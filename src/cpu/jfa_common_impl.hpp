@@ -140,7 +140,7 @@ inline void jfa_cpu_common(const Config& cfg,
         ++pass_idx;
     }
 
-    const SeedIndexBuffer& final_buf = fromA ? bufB : bufA;
+    const SeedIndexBuffer& final_buf = fromA ? bufA : bufB;
     out_buffer = final_buf;
 }
 

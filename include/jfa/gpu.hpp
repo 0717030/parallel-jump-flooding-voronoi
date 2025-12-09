@@ -1,16 +1,24 @@
-// include/jfa/gpu.hpp
 #pragma once
-#include "jfa/types.hpp"
+#include <jfa/types.hpp>
+#include <vector>
+#include <functional>
 
 namespace jfa {
 
-void jfa_cuda_basic(const Config& cfg,
-                    const std::vector<Seed>& seeds,
-                    SeedIndexBuffer& out,
-                    PassCallback cb = nullptr);
+// Callback for visualization/debugging, similar to CPU version
+using PassCallback = std::function<void(int passIndex,
+                                        int step,
+                                        const SeedIndexBuffer& buffer)>;
 
-// 之後隊友可以再加進階版本：
-// void jfa_cuda_inplace(...);
-// void jfa_cuda_jfa_plus1(...);
+void jfa_gpu_cuda(const Config& cfg,
+                  const std::vector<Seed>& seeds,
+                  SeedIndexBuffer& out_buffer,
+                  PassCallback pass_cb = nullptr);
+
+// Overload for raw pointer output (useful for custom host memory allocation)
+void jfa_gpu_cuda(const Config& cfg,
+                  const std::vector<Seed>& seeds,
+                  int* out_buffer_ptr,
+                  PassCallback pass_cb = nullptr);
 
 } // namespace jfa
