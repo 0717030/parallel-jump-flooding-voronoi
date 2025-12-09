@@ -33,18 +33,24 @@ struct Options {
     bool use_constant_mem = false;   // NEW: Use constant memory
     int pixels_per_thread = 1;       // NEW: Pixels per thread
     bool use_pitch = false;          // NEW: Use pitched memory
+    bool use_pinned = false;         // NEW: Use pinned memory
+    bool use_soa = false;            // NEW: Use Structure of Arrays
+    bool skip_exact = false;         // NEW: Skip exact check
+    bool skip_serial = false;        // NEW: Skip serial check
 };
 
 void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n"
               << "Options:\n"
-              << "  --backend {serial|omp}   Select CPU JFA implementation (default: omp)\n"
+              << "  --backend {serial|omp|cuda} Select JFA implementation (default: omp)\n"
               << "  --threads N              Number of threads for OpenMP backend (default: 8)\n"
               << "  --block-dim N            CUDA block dimension (square, default: 16)\n"
               << "  --block-dim-x N          CUDA block dimension X (default: 16)\n"
               << "  --block-dim-y N          CUDA block dimension Y (default: 16)\n"
               << "  --ppt N                  Pixels per thread (default: 1)\n"
               << "  --use-pitch              Use cudaMallocPitch for memory alignment (default: off)\n"
+              << "  --pinned                 Use cudaMallocHost for pinned memory (default: off)\n"
+              << "  --soa                    Use Structure of Arrays for seeds (default: off)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -52,6 +58,8 @@ void print_usage(const char* prog) {
               << "  --seeds N                Number of random seeds (default: 50)\n"
               << "  --seed N                 RNG seed for reproducibility (default: 42)\n"
               << "  --no-dump                Do not dump per-pass PPM frames (profiling mode)\n"
+              << "  --skip-exact             Skip exact verification (for large scale bench)\n"
+              << "  --skip-serial            Skip serial verification (for large scale bench)\n"
               << "  --output-dir DIR        Directory to store PPM frames (default: output)\n" // NEW
               << "  --csv                    Also print a machine-readable CSV summary line\n" // NEW
               << "  --tag NAME               Logical name of this run; used in auto output folder\n" // NEW
@@ -135,6 +143,17 @@ Options parse_args(int argc, char** argv) {
             }
         } else if (arg == "--use-pitch") {
             opt.use_pitch = true;
+        } else if (arg == "--pinned") {
+            opt.use_pinned = true;
+        } else if (arg == "--soa") {
+            opt.use_soa = true;
+        } else if (arg == "--skip-check") {
+            opt.skip_exact = true;
+            opt.skip_serial = true;
+        } else if (arg == "--skip-exact") {
+            opt.skip_exact = true;
+        } else if (arg == "--skip-serial") {
+            opt.skip_serial = true;
         } else if (arg.rfind("--width", 0) == 0) {
             std::string v;
             if (!get_value(v) || !parse_int(v, opt.width) || opt.width <= 0) {
@@ -235,16 +254,24 @@ int main(int argc, char** argv)
     cfg.use_constant_mem = opt.use_constant_mem;
     cfg.pixels_per_thread = opt.pixels_per_thread;
     cfg.use_pitch = opt.use_pitch;
+    cfg.use_soa = opt.use_soa;
 
     std::cout << "Config:\n"
-              << "  backend   = " << opt.backend << "\n"
-              << "  threads   = " << (opt.backend == "omp" ? opt.threads : 1) << "\n"
-              << "  block_dim = " << opt.block_dim_x << "x" << opt.block_dim_y << "\n"
-              << "  ppt       = " << opt.pixels_per_thread << "\n"
-              << "  use_pitch = " << (opt.use_pitch ? "yes" : "no") << "\n"
-              << "  shared_mem= " << (opt.use_shared_mem ? "yes" : "no") << "\n"
-              << "  const_mem = " << (opt.use_constant_mem ? "yes" : "no") << "\n"
-              << "  size      = " << cfg.width << " x " << cfg.height << "\n"
+              << "  backend   = " << opt.backend << "\n";
+
+    if (opt.backend == "omp") {
+        std::cout << "  threads   = " << opt.threads << "\n";
+    } else if (opt.backend == "cuda") {
+        std::cout << "  block_dim = " << opt.block_dim_x << "x" << opt.block_dim_y << "\n"
+                  << "  ppt       = " << opt.pixels_per_thread << "\n"
+                  << "  use_pitch = " << (opt.use_pitch ? "yes" : "no") << "\n"
+                  << "  pinned    = " << (opt.use_pinned ? "yes" : "no") << "\n"
+                  << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
+                  << "  shared_mem= " << (opt.use_shared_mem ? "yes" : "no") << "\n"
+                  << "  const_mem = " << (opt.use_constant_mem ? "yes" : "no") << "\n";
+    }
+
+    std::cout << "  size      = " << cfg.width << " x " << cfg.height << "\n"
               << "  #seeds    = " << opt.num_seeds << "\n"
               << "  dump      = " << (opt.dump_frames ? "yes" : "no") << "\n"
               << "  rng_seed  = " << opt.rng_seed << "\n";
@@ -265,18 +292,30 @@ int main(int argc, char** argv)
     jfa::SeedIndexBuffer serial_buf;
     jfa::SeedIndexBuffer omp_buf;
 
-    // 1) exact baseline
-    auto t_exact_0 = Clock::now();
-    jfa::voronoi_exact_cpu(cfg, seeds, exact_buf);
-    auto t_exact_1 = Clock::now();
-    double exact_ms = std::chrono::duration<double, std::milli>(t_exact_1 - t_exact_0).count();
-    std::cout << "\n[Exact] time = " << exact_ms << " ms\n";
+    double exact_ms = 0;
+    double serial_ms = 0;
 
-    // 2) serial JFA：永遠跑一次當 baseline（不 dump frame）
-    auto t_serial_0 = Clock::now();
-    jfa::jfa_cpu_serial(cfg, seeds, serial_buf, nullptr);
-    auto t_serial_1 = Clock::now();
-    double serial_ms = std::chrono::duration<double, std::milli>(t_serial_1 - t_serial_0).count();
+    // 1) exact baseline
+    if (!opt.skip_exact) {
+        auto t_exact_0 = Clock::now();
+        jfa::voronoi_exact_cpu(cfg, seeds, exact_buf);
+        auto t_exact_1 = Clock::now();
+        exact_ms = std::chrono::duration<double, std::milli>(t_exact_1 - t_exact_0).count();
+        std::cout << "\n[Exact] time = " << exact_ms << " ms\n";
+    } else {
+        std::cout << "\n[Exact] Skipped\n";
+    }
+
+    // 2) serial JFA
+    if (!opt.skip_serial) {
+        auto t_serial_0 = Clock::now();
+        jfa::jfa_cpu_serial(cfg, seeds, serial_buf, nullptr);
+        auto t_serial_1 = Clock::now();
+        serial_ms = std::chrono::duration<double, std::milli>(t_serial_1 - t_serial_0).count();
+    } else {
+        std::cout << "\n[Serial] Skipped\n";
+        serial_ms = 1.0; // avoid div by zero
+    }
 
     auto diff_count = [](const jfa::SeedIndexBuffer& a,
                          const jfa::SeedIndexBuffer& b) {
@@ -287,10 +326,15 @@ int main(int argc, char** argv)
         return diff;
     };
 
-    int diff_exact_serial = diff_count(exact_buf, serial_buf);
+    int diff_exact_serial = (!opt.skip_exact && !opt.skip_serial) ? diff_count(exact_buf, serial_buf) : -1;
 
-    std::cout << "[Serial JFA] time = " << serial_ms << " ms"
-              << ", diff vs exact = " << diff_exact_serial << " pixels\n";
+    if (!opt.skip_serial) {
+        std::cout << "[Serial JFA] time = " << serial_ms << " ms";
+        if (!opt.skip_exact) {
+            std::cout << ", diff vs exact = " << diff_exact_serial << " pixels";
+        }
+        std::cout << "\n";
+    }
 
     // NEW: 預設「目前 backend 的結果」先等於 serial baseline
     double parallel_ms = serial_ms;
@@ -342,17 +386,20 @@ int main(int argc, char** argv)
         auto t1 = Clock::now();
         double omp_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-        int diff_exact_omp = diff_count(exact_buf, omp_buf);
-        int diff_serial_omp = diff_count(serial_buf, omp_buf);
+        int diff_exact_omp = opt.skip_exact ? -1 : diff_count(exact_buf, omp_buf);
+        int diff_serial_omp = opt.skip_serial ? -1 : diff_count(serial_buf, omp_buf);
 
         std::cout << "[OpenMP JFA] threads = " << opt.threads
-                  << ", time = " << omp_ms << " ms"
-                  << ", diff vs exact = " << diff_exact_omp
-                  << ", diff vs serial = " << diff_serial_omp << " pixels\n";
+                  << ", time = " << omp_ms << " ms";
+        if (!opt.skip_exact) std::cout << ", diff vs exact = " << diff_exact_omp;
+        if (!opt.skip_serial) std::cout << ", diff vs serial = " << diff_serial_omp;
+        std::cout << " pixels\n";
 
-        double speedup_vs_serial = serial_ms / omp_ms;
-        std::cout << "  speedup vs serial JFA = "
-                  << speedup_vs_serial << "x\n";
+        if (!opt.skip_serial) {
+            double speedup_vs_serial = serial_ms / omp_ms;
+            std::cout << "  speedup vs serial JFA = "
+                      << speedup_vs_serial << "x\n";
+        }
 
         // NEW: 給 CSV 用的「parallel」結果改成 OMP 版
         parallel_ms = omp_ms;
@@ -363,59 +410,38 @@ int main(int argc, char** argv)
         auto cb = make_callback("gpu_jfa_cuda");
         auto t0 = Clock::now();
         try {
-            if (opt.use_pitch) {
-                // Method 2 & 3: Use cudaHostAlloc (Pinned Memory)
-                int* pinned_buf = nullptr;
-                // We need to include cuda_runtime.h or declare it. 
-                // Since this is a .cpp file and we might not want to include cuda headers here directly if not compiled with nvcc,
-                // but usually in CMake setup for CUDA project, .cpp can include cuda_runtime.h.
-                // However, to be safe and clean, we should probably move this allocation to a wrapper or assume cuda_runtime.h is available.
-                // Let's assume we can call cudaHostAlloc. If not, we might need to add #include <cuda_runtime.h>
-                // But wait, jfa_demo.cpp is compiled as CXX, not CUDA.
-                // We should probably expose a helper function in jfa/gpu.hpp to allocate pinned memory.
+            if (opt.use_pinned) {
+                // Use Pinned Memory (Host)
+                int* pinned_buf = jfa::allocate_pinned_memory(cfg.width * cfg.height);
+                if (!pinned_buf) throw std::runtime_error("Failed to allocate pinned memory");
                 
-                // For now, let's just use the standard vector for Method 1, 
-                // and for Method 2/3, we rely on the implementation inside jfa_gpu_cuda to handle the pinned memory 
-                // OR we modify jfa_gpu_cuda to accept a raw pointer and we allocate it here.
+                jfa::jfa_gpu_cuda(cfg, seeds, pinned_buf, cb);
                 
-                // Let's try to include cuda_runtime.h. If it fails, we'll know.
-                // Actually, let's just use the standard vector and let the internal implementation handle the "simulation" of pinned memory 
-                // by allocating a temporary pinned buffer and copying to it, as discussed.
-                // BUT the prompt asked to "Use cudaHostAlloc to allocate the host memory".
-                // So the application SHOULD hold the memory in pinned memory.
+                // Copy back to vector for validation/dump
+                cuda_buf.assign(pinned_buf, pinned_buf + cfg.width * cfg.height);
                 
-                // Let's add a helper in gpu.hpp: jfa::allocate_pinned_memory(size_t size) -> int*
-                // and jfa::free_pinned_memory(int* ptr).
-                
-                // Since I cannot easily add those helpers without editing .cu files and recompiling everything properly,
-                // I will stick to the plan: 
-                // Method 1: Standard vector.
-                // Method 2/3: Standard vector passed to wrapper, BUT wrapper will allocate pinned memory internally 
-                // and copy data to it to simulate the "Host Memory is Pinned" scenario for the GPU operation duration.
-                // This is a valid benchmark for the "GPU part".
-                
-                // WAIT, the user said "Use cudaHostAlloc to allocate the host memory... Name the file kernel2.cu".
-                // I am editing existing files.
-                // I will modify jfa_gpu_cuda_impl to handle this.
-                
-                jfa::jfa_gpu_cuda(cfg, seeds, cuda_buf, cb);
+                jfa::free_pinned_memory(pinned_buf);
             } else {
+                // Use Pageable Memory (Host)
                 jfa::jfa_gpu_cuda(cfg, seeds, cuda_buf, cb);
             }
             
             auto t1 = Clock::now();
             double cuda_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-            int diff_exact_cuda = diff_count(exact_buf, cuda_buf);
-            int diff_serial_cuda = diff_count(serial_buf, cuda_buf);
+            int diff_exact_cuda = opt.skip_exact ? -1 : diff_count(exact_buf, cuda_buf);
+            int diff_serial_cuda = opt.skip_serial ? -1 : diff_count(serial_buf, cuda_buf);
 
-            std::cout << "[CUDA JFA] time = " << cuda_ms << " ms"
-                      << ", diff vs exact = " << diff_exact_cuda
-                      << ", diff vs serial = " << diff_serial_cuda << " pixels\n";
+            std::cout << "[CUDA JFA] time = " << cuda_ms << " ms";
+            if (!opt.skip_exact) std::cout << ", diff vs exact = " << diff_exact_cuda;
+            if (!opt.skip_serial) std::cout << ", diff vs serial = " << diff_serial_cuda;
+            std::cout << " pixels\n";
 
-            double speedup_vs_serial = serial_ms / cuda_ms;
-            std::cout << "  speedup vs serial JFA = "
-                      << speedup_vs_serial << "x\n";
+            if (!opt.skip_serial) {
+                double speedup_vs_serial = serial_ms / cuda_ms;
+                std::cout << "  speedup vs serial JFA = "
+                          << speedup_vs_serial << "x\n";
+            }
 
             parallel_ms = cuda_ms;
             diff_exact_parallel = diff_exact_cuda;

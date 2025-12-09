@@ -21,4 +21,8 @@ void jfa_gpu_cuda(const Config& cfg,
                   int* out_buffer_ptr,
                   PassCallback pass_cb = nullptr);
 
+// Helper functions for pinned memory
+int* allocate_pinned_memory(size_t count);
+void free_pinned_memory(int* ptr);
+
 } // namespace jfa

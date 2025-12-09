@@ -173,6 +173,125 @@ __device__ inline void process_pixel(int x, int y, int width, int height, int st
     out_buf[idx] = best_seed_idx;
 }
 
+// Helper device function to process one pixel (SoA version)
+__device__ inline void process_pixel_soa(int x, int y, int width, int height, int step, 
+                                     const int* in_buf, int* out_buf, 
+                                     const int* seeds_x, const int* seeds_y) 
+{
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = in_buf[idx];
+    float best_dist = 1e30f; // Infinity
+
+    if (best_seed_idx != -1) {
+        float dx = (float)(x - seeds_x[best_seed_idx]);
+        float dy = (float)(y - seeds_y[best_seed_idx]);
+        best_dist = dx * dx + dy * dy;
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * width + nx;
+                int neighbor_seed_idx = in_buf[n_idx];
+
+                if (neighbor_seed_idx != -1) {
+                    float dist_x = (float)(x - seeds_x[neighbor_seed_idx]);
+                    float dist_y = (float)(y - seeds_y[neighbor_seed_idx]);
+                    float dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                    if (dist_sq < best_dist) {
+                        best_dist = dist_sq;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
+// Helper device function to process one pixel with pitch (SoA version)
+__device__ inline void process_pixel_pitch_soa(int x, int y, int width, int height, int step, 
+                                           const int* in_buf, int* out_buf, 
+                                           const int* seeds_x, const int* seeds_y, size_t pitch_ints) 
+{
+    if (x >= width || y >= height) return;
+
+    // Use pitch for row indexing
+    int idx = y * pitch_ints + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = in_buf[idx];
+    float best_dist = 1e30f; // Infinity
+
+    if (best_seed_idx != -1) {
+        float dx = (float)(x - seeds_x[best_seed_idx]);
+        float dy = (float)(y - seeds_y[best_seed_idx]);
+        best_dist = dx * dx + dy * dy;
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * pitch_ints + nx;
+                int neighbor_seed_idx = in_buf[n_idx];
+
+                if (neighbor_seed_idx != -1) {
+                    float dist_x = (float)(x - seeds_x[neighbor_seed_idx]);
+                    float dist_y = (float)(y - seeds_y[neighbor_seed_idx]);
+                    float dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                    if (dist_sq < best_dist) {
+                        best_dist = dist_sq;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
+// Kernel to place initial seeds into the buffer (SoA version)
+__global__ void place_seeds_kernel_soa(int* buffer, const int* seeds_x, const int* seeds_y, int num_seeds, int width, int height) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_seeds) return;
+
+    int sx = seeds_x[idx];
+    int sy = seeds_y[idx];
+    if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+        atomicMax(&buffer[sy * width + sx], idx);
+    }
+}
+
+// Kernel to place initial seeds into the buffer (Pitch + SoA version)
+__global__ void place_seeds_kernel_pitch_soa(int* buffer, const int* seeds_x, const int* seeds_y, int num_seeds, int width, int height, size_t pitch_ints) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_seeds) return;
+
+    int sx = seeds_x[idx];
+    int sy = seeds_y[idx];
+    if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+        atomicMax(&buffer[sy * pitch_ints + sx], idx);
+    }
+}
+
 // JFA Step Kernel with Thread Coarsening
 __global__ void jfa_step_kernel(const int* in_buf, int* out_buf, 
                                 const GPUSeed* seeds, 
@@ -185,6 +304,21 @@ __global__ void jfa_step_kernel(const int* in_buf, int* out_buf,
     for (int i = 0; i < pixels_per_thread; ++i) {
         int x = start_x + i;
         process_pixel(x, y, width, height, step, in_buf, out_buf, seeds);
+    }
+}
+
+// JFA Step Kernel (SoA version)
+__global__ void jfa_step_kernel_soa(const int* in_buf, int* out_buf, 
+                                const int* seeds_x, const int* seeds_y, 
+                                int width, int height, int step,
+                                int pixels_per_thread) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_soa(x, y, width, height, step, in_buf, out_buf, seeds_x, seeds_y);
     }
 }
 
@@ -245,8 +379,25 @@ __global__ void jfa_step_kernel_pitch(const int* in_buf, int* out_buf,
     }
 }
 
+// JFA Step Kernel with Pitch (SoA version)
+__global__ void jfa_step_kernel_pitch_soa(const int* in_buf, int* out_buf, 
+                                      const int* seeds_x, const int* seeds_y, 
+                                      int width, int height, int step,
+                                      int pixels_per_thread, size_t pitch_ints) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_pitch_soa(x, y, width, height, step, in_buf, out_buf, seeds_x, seeds_y, pitch_ints);
+    }
+}
+
 int jfa_gpu_cuda_impl(const Config& cfg,
-                       const GPUSeed* seeds, int num_seeds,
+                       const GPUSeed* seeds, 
+                       const int* seeds_x, const int* seeds_y,
+                       int num_seeds,
                        int* out_buffer,
                        InternalCallback cb,
                        void* user_data)
@@ -273,6 +424,8 @@ int jfa_gpu_cuda_impl(const Config& cfg,
     int *d_bufA = nullptr;
     int *d_bufB = nullptr;
     GPUSeed* d_seeds = nullptr;
+    int* d_seeds_x = nullptr;
+    int* d_seeds_y = nullptr;
     size_t pitch_bytes = 0;
     size_t pitch_ints = 0;
 
@@ -287,16 +440,26 @@ int jfa_gpu_cuda_impl(const Config& cfg,
         CUDA_CHECK(cudaMalloc(&d_bufB, num_pixels * sizeof(int)));
         pitch_ints = width; // Pitch is just width
     }
-    CUDA_CHECK(cudaMalloc(&d_seeds, num_seeds * sizeof(GPUSeed)));
+
+    if (cfg.use_soa) {
+        CUDA_CHECK(cudaMalloc(&d_seeds_x, num_seeds * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_seeds_y, num_seeds * sizeof(int)));
+    } else {
+        CUDA_CHECK(cudaMalloc(&d_seeds, num_seeds * sizeof(GPUSeed)));
+    }
 
     auto t_alloc = std::chrono::high_resolution_clock::now();
 
     // Copy seeds to device
-    CUDA_CHECK(cudaMemcpy(d_seeds, seeds, 
-                          num_seeds * sizeof(GPUSeed), cudaMemcpyHostToDevice));
+    if (cfg.use_soa) {
+        CUDA_CHECK(cudaMemcpy(d_seeds_x, seeds_x, num_seeds * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_seeds_y, seeds_y, num_seeds * sizeof(int), cudaMemcpyHostToDevice));
+    } else {
+        CUDA_CHECK(cudaMemcpy(d_seeds, seeds, num_seeds * sizeof(GPUSeed), cudaMemcpyHostToDevice));
+    }
 
     // Copy seeds to constant memory if requested
-    if (use_constant) {
+    if (use_constant && !cfg.use_soa) { // Constant memory only implemented for AoS for now
         if (num_seeds > MAX_CONST_SEEDS) {
             printf("Warning: Too many seeds for constant memory (%d > %d). Falling back to global memory.\n", 
                    num_seeds, MAX_CONST_SEEDS);
@@ -321,14 +484,20 @@ int jfa_gpu_cuda_impl(const Config& cfg,
     CUDA_CHECK(cudaGetLastError());
 
     // Place seeds into bufA
-    if (cfg.use_pitch) {
-        int blockSize = 256;
-        int seedBlocks = (num_seeds + blockSize - 1) / blockSize;
-        place_seeds_kernel_pitch<<<seedBlocks, blockSize>>>(d_bufA, d_seeds, num_seeds, width, height, pitch_ints);
+    int blockSize = 256;
+    int seedBlocks = (num_seeds + blockSize - 1) / blockSize;
+    if (cfg.use_soa) {
+        if (cfg.use_pitch) {
+            place_seeds_kernel_pitch_soa<<<seedBlocks, blockSize>>>(d_bufA, d_seeds_x, d_seeds_y, num_seeds, width, height, pitch_ints);
+        } else {
+            place_seeds_kernel_soa<<<seedBlocks, blockSize>>>(d_bufA, d_seeds_x, d_seeds_y, num_seeds, width, height);
+        }
     } else {
-        int blockSize = 256;
-        int seedBlocks = (num_seeds + blockSize - 1) / blockSize;
-        place_seeds_kernel<<<seedBlocks, blockSize>>>(d_bufA, d_seeds, num_seeds, width, height);
+        if (cfg.use_pitch) {
+            place_seeds_kernel_pitch<<<seedBlocks, blockSize>>>(d_bufA, d_seeds, num_seeds, width, height, pitch_ints);
+        } else {
+            place_seeds_kernel<<<seedBlocks, blockSize>>>(d_bufA, d_seeds, num_seeds, width, height);
+        }
     }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize()); // Sync for timing
@@ -362,23 +531,26 @@ int jfa_gpu_cuda_impl(const Config& cfg,
 
     int pass_idx = 0;
     while (step >= 1) {
-        if (cfg.use_pitch) {
-            // Method 2 & 3: Use Pitch Kernel
-            // Note: Shared/Constant memory optimizations are orthogonal, but let's keep it simple and just use the pitch kernel
-            // If user wants shared/constant with pitch, we'd need more kernel variants.
-            // For now, let's assume Method 2/3 implies "Standard Pitch Kernel" unless we add more variants.
-            // But wait, the prompt implies Method 2/3 are distinct implementations.
-            // Let's use jfa_step_kernel_pitch.
-            jfa_step_kernel_pitch<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt, pitch_ints);
-        } else {
-            // Method 1
-            if (use_shared) {
-                int shared_mem_size = num_seeds * sizeof(GPUSeed);
-                jfa_step_kernel_shared<<<dimGrid, dimBlock, shared_mem_size>>>(d_in, d_out, d_seeds, width, height, step, num_seeds, ppt);
-            } else if (use_constant) {
-                jfa_step_kernel_constant<<<dimGrid, dimBlock>>>(d_in, d_out, width, height, step, ppt);
+        if (cfg.use_soa) {
+            if (cfg.use_pitch) {
+                jfa_step_kernel_pitch_soa<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds_x, d_seeds_y, width, height, step, ppt, pitch_ints);
             } else {
-                jfa_step_kernel<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                jfa_step_kernel_soa<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds_x, d_seeds_y, width, height, step, ppt);
+            }
+        } else {
+            if (cfg.use_pitch) {
+                // Method 2 & 3: Use Pitch Kernel
+                jfa_step_kernel_pitch<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt, pitch_ints);
+            } else {
+                // Method 1
+                if (use_shared) {
+                    int shared_mem_size = num_seeds * sizeof(GPUSeed);
+                    jfa_step_kernel_shared<<<dimGrid, dimBlock, shared_mem_size>>>(d_in, d_out, d_seeds, width, height, step, num_seeds, ppt);
+                } else if (use_constant) {
+                    jfa_step_kernel_constant<<<dimGrid, dimBlock>>>(d_in, d_out, width, height, step, ppt);
+                } else {
+                    jfa_step_kernel<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                }
             }
         }
         CUDA_CHECK(cudaGetLastError());
@@ -435,7 +607,12 @@ int jfa_gpu_cuda_impl(const Config& cfg,
     // Cleanup
     CUDA_CHECK(cudaFree(d_bufA));
     CUDA_CHECK(cudaFree(d_bufB));
-    CUDA_CHECK(cudaFree(d_seeds));
+    if (cfg.use_soa) {
+        CUDA_CHECK(cudaFree(d_seeds_x));
+        CUDA_CHECK(cudaFree(d_seeds_y));
+    } else {
+        CUDA_CHECK(cudaFree(d_seeds));
+    }
 
     auto t_free = std::chrono::high_resolution_clock::now();
 

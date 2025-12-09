@@ -27,6 +27,7 @@ struct Config {
     bool use_pitch = false; // Use cudaMallocPitch for memory alignment
     bool use_shared_mem = false; // Use shared memory for seeds
     bool use_constant_mem = false; // Use constant memory for seeds
+    bool use_soa = false; // Use Structure of Arrays for seeds
 };
 
 } // namespace jfa
