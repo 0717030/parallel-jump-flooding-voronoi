@@ -2,8 +2,25 @@
 #include <vector>
 #include <cstring> // for memcpy if needed
 #include <stdexcept>
+#include <cuda_runtime.h> // For cudaMallocHost
 
 namespace jfa {
+
+// Helper to allocate pinned memory
+int* allocate_pinned_memory(size_t count) {
+    int* ptr = nullptr;
+    if (cudaMallocHost(&ptr, count * sizeof(int)) != cudaSuccess) {
+        return nullptr;
+    }
+    return ptr;
+}
+
+// Helper to free pinned memory
+void free_pinned_memory(int* ptr) {
+    if (ptr) {
+        cudaFreeHost(ptr);
+    }
+}
 
 // Define GPUSeed here to match .cu (layout compatible with Seed)
 struct GPUSeed {
@@ -14,7 +31,9 @@ struct GPUSeed {
 using InternalCallback = void (*)(int pass_idx, int step, const int* data, int size, void* user_data);
 
 int jfa_gpu_cuda_impl(const Config& cfg,
-                       const GPUSeed* seeds, int num_seeds,
+                       const GPUSeed* seeds, 
+                       const int* seeds_x, const int* seeds_y,
+                       int num_seeds,
                        int* out_buffer,
                        InternalCallback cb,
                        void* user_data);
@@ -36,27 +55,7 @@ void jfa_gpu_cuda(const Config& cfg,
                   PassCallback pass_cb)
 {
     out_buffer.resize(cfg.width * cfg.height);
-
-    // Convert seeds to GPUSeed array
-    std::vector<GPUSeed> gpu_seeds(seeds.size());
-    for(size_t i=0; i<seeds.size(); ++i) {
-        gpu_seeds[i] = {seeds[i].x, seeds[i].y};
-    }
-
-    int ret = 0;
-    if (pass_cb) {
-        ret = jfa_gpu_cuda_impl(cfg,
-                                gpu_seeds.data(), (int)gpu_seeds.size(),
-                                out_buffer.data(),
-                                callback_wrapper, &pass_cb);
-    } else {
-        ret = jfa_gpu_cuda_impl(cfg,
-                                gpu_seeds.data(), (int)gpu_seeds.size(),
-                                out_buffer.data(),
-                                nullptr, nullptr);
-    }    if (ret != 0) {
-        throw std::runtime_error("CUDA execution failed (see stdout for details)");
-    }
+    jfa_gpu_cuda(cfg, seeds, out_buffer.data(), pass_cb);
 }
 
 void jfa_gpu_cuda(const Config& cfg,
@@ -64,24 +63,32 @@ void jfa_gpu_cuda(const Config& cfg,
                   int* out_buffer_ptr,
                   PassCallback pass_cb)
 {
-    // Convert seeds to GPUSeed array
-    std::vector<GPUSeed> gpu_seeds(seeds.size());
-    for(size_t i=0; i<seeds.size(); ++i) {
-        gpu_seeds[i] = {seeds[i].x, seeds[i].y};
+    std::vector<GPUSeed> gpu_seeds;
+    std::vector<int> seeds_x;
+    std::vector<int> seeds_y;
+
+    if (cfg.use_soa) {
+        seeds_x.resize(seeds.size());
+        seeds_y.resize(seeds.size());
+        for(size_t i=0; i<seeds.size(); ++i) {
+            seeds_x[i] = seeds[i].x;
+            seeds_y[i] = seeds[i].y;
+        }
+    } else {
+        gpu_seeds.resize(seeds.size());
+        for(size_t i=0; i<seeds.size(); ++i) {
+            gpu_seeds[i] = {seeds[i].x, seeds[i].y};
+        }
     }
 
-    int ret = 0;
-    if (pass_cb) {
-        ret = jfa_gpu_cuda_impl(cfg,
-                                gpu_seeds.data(), (int)gpu_seeds.size(),
+    int ret = jfa_gpu_cuda_impl(cfg,
+                                cfg.use_soa ? nullptr : gpu_seeds.data(),
+                                cfg.use_soa ? seeds_x.data() : nullptr,
+                                cfg.use_soa ? seeds_y.data() : nullptr,
+                                (int)seeds.size(),
                                 out_buffer_ptr,
-                                callback_wrapper, &pass_cb);
-    } else {
-        ret = jfa_gpu_cuda_impl(cfg,
-                                gpu_seeds.data(), (int)gpu_seeds.size(),
-                                out_buffer_ptr,
-                                nullptr, nullptr);
-    }
+                                pass_cb ? callback_wrapper : nullptr, 
+                                pass_cb ? &pass_cb : nullptr);
 
     if (ret != 0) {
         throw std::runtime_error("CUDA execution failed (see stdout for details)");
