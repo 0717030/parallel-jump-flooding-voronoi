@@ -4,7 +4,8 @@ import subprocess
 from pathlib import Path
 
 # 假設你的 build 在 ../build
-JFA_BIN = Path(__file__).resolve().parent.parent / "build" / "jfa_demo"
+JFA_BIN = Path(__file__).resolve().parent.parent / "build-release" / "jfa_bench"
+
 
 # 想測哪些 backend（之後加 CUDA 只要在這裡加）
 BACKENDS = [
@@ -41,6 +42,7 @@ def run_case(backend_name, backend_opts, width, height, threads):
         threads = 1
 
     print("Running:", " ".join(args))
+
     proc = subprocess.run(args, capture_output=True, text=True, check=True)
 
     csv_line = None
@@ -78,6 +80,7 @@ def run_case(backend_name, backend_opts, width, height, threads):
 
 
 def main():
+    print("Using JFA_BIN =", JFA_BIN)
     results = []
 
     for W, H in SIZES:
