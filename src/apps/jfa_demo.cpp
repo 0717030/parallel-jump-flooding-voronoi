@@ -35,6 +35,7 @@ struct Options {
     bool use_pitch = false;          // NEW: Use pitched memory
     bool use_pinned = false;         // NEW: Use pinned memory
     bool use_soa = false;            // NEW: Use Structure of Arrays
+    bool use_coord_prop = false;     // NEW: Use Coordinate Propagation
     bool skip_exact = false;         // NEW: Skip exact check
     bool skip_serial = false;        // NEW: Skip serial check
 };
@@ -51,6 +52,7 @@ void print_usage(const char* prog) {
               << "  --use-pitch              Use cudaMallocPitch for memory alignment (default: off)\n"
               << "  --pinned                 Use cudaMallocHost for pinned memory (default: off)\n"
               << "  --soa                    Use Structure of Arrays for seeds (default: off)\n"
+              << "  --use-coord-prop         Use Coordinate Propagation (default: off)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -58,6 +60,7 @@ void print_usage(const char* prog) {
               << "  --seeds N                Number of random seeds (default: 50)\n"
               << "  --seed N                 RNG seed for reproducibility (default: 42)\n"
               << "  --no-dump                Do not dump per-pass PPM frames (profiling mode)\n"
+              << "  --skip-check             Skip both exact and serial verification (for large scale bench)\n"
               << "  --skip-exact             Skip exact verification (for large scale bench)\n"
               << "  --skip-serial            Skip serial verification (for large scale bench)\n"
               << "  --output-dir DIR        Directory to store PPM frames (default: output)\n" // NEW
@@ -147,6 +150,8 @@ Options parse_args(int argc, char** argv) {
             opt.use_pinned = true;
         } else if (arg == "--soa") {
             opt.use_soa = true;
+        } else if (arg == "--use-coord-prop") {
+            opt.use_coord_prop = true;
         } else if (arg == "--skip-check") {
             opt.skip_exact = true;
             opt.skip_serial = true;
@@ -255,6 +260,7 @@ int main(int argc, char** argv)
     cfg.pixels_per_thread = opt.pixels_per_thread;
     cfg.use_pitch = opt.use_pitch;
     cfg.use_soa = opt.use_soa;
+    cfg.use_coord_prop = opt.use_coord_prop;
 
     std::cout << "Config:\n"
               << "  backend   = " << opt.backend << "\n";
@@ -267,6 +273,7 @@ int main(int argc, char** argv)
                   << "  use_pitch = " << (opt.use_pitch ? "yes" : "no") << "\n"
                   << "  pinned    = " << (opt.use_pinned ? "yes" : "no") << "\n"
                   << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
+                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n"
                   << "  shared_mem= " << (opt.use_shared_mem ? "yes" : "no") << "\n"
                   << "  const_mem = " << (opt.use_constant_mem ? "yes" : "no") << "\n";
     }
