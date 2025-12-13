@@ -7,6 +7,9 @@ set(CMAKE_CUDA_STANDARD 17)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Make CUDA Toolkit headers/libs (e.g. cuda_runtime.h, cudart) available to C++ targets.
+find_package(CUDAToolkit REQUIRED)
+
 # CPU JFA library
 add_library(jfa_cpu
     src/cpu/jfa_serial.cpp
@@ -19,10 +22,13 @@ add_library(jfa_gpu
     src/gpu/jfa_cuda.cu
     src/gpu/jfa_gpu_wrapper.cpp
 )
-# set_property(TARGET jfa_gpu PROPERTY CUDA_ARCHITECTURES native)
-# Fallback to a common architecture if native detection fails (e.g. no GPU during build)
+
+# Ensure C++ compilation units in this target can find CUDA headers and link cudart.
+target_link_libraries(jfa_gpu PUBLIC CUDA::cudart)
+
+# If user didn't specify architectures, include RTX 4090 (sm_89) plus a couple of common ones.
 if(NOT CMAKE_CUDA_ARCHITECTURES)
-    set_property(TARGET jfa_gpu PROPERTY CUDA_ARCHITECTURES 60 75)
+    set_property(TARGET jfa_gpu PROPERTY CUDA_ARCHITECTURES 60 75 89)
 endif()
 
 # Exact Voronoi baseline（你也可以跟 jfa_cpu 合在一起）

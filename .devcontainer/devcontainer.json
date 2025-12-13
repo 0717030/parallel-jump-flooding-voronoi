@@ -1,0 +1,31 @@
+{
+  "name": "parallel-jump-flooding-voronoi",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-python.python"
+      ]
+    }
+  },
+  "settings": {
+    "cmake.configureOnOpen": false
+  },
+  "remoteUser": "vscode",
+  "runArgs": [
+    "--gpus",
+    "all",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt",
+    "seccomp=unconfined"
+  ],
+  "containerEnv": {
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility"
+  }
+}
