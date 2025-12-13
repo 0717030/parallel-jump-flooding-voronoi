@@ -28,6 +28,8 @@ struct Config {
     bool use_shared_mem = false; // Use shared memory for seeds
     bool use_constant_mem = false; // Use constant memory for seeds
     bool use_soa = false; // Use Structure of Arrays for seeds
+    bool use_coord_prop = false; // Use Coordinate Propagation (avoids seed lookup)
+    int benchmark_frames = 1; // Number of frames to simulate (reuse allocation)
 };
 
 } // namespace jfa

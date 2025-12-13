@@ -67,7 +67,10 @@ void jfa_gpu_cuda(const Config& cfg,
     std::vector<int> seeds_x;
     std::vector<int> seeds_y;
 
-    if (cfg.use_soa) {
+    // If using Coordinate Propagation, we prefer AoS seeds for initialization simplicity
+    bool use_soa_layout = cfg.use_soa && !cfg.use_coord_prop;
+
+    if (use_soa_layout) {
         seeds_x.resize(seeds.size());
         seeds_y.resize(seeds.size());
         for(size_t i=0; i<seeds.size(); ++i) {
@@ -82,9 +85,9 @@ void jfa_gpu_cuda(const Config& cfg,
     }
 
     int ret = jfa_gpu_cuda_impl(cfg,
-                                cfg.use_soa ? nullptr : gpu_seeds.data(),
-                                cfg.use_soa ? seeds_x.data() : nullptr,
-                                cfg.use_soa ? seeds_y.data() : nullptr,
+                                use_soa_layout ? nullptr : gpu_seeds.data(),
+                                use_soa_layout ? seeds_x.data() : nullptr,
+                                use_soa_layout ? seeds_y.data() : nullptr,
                                 (int)seeds.size(),
                                 out_buffer_ptr,
                                 pass_cb ? callback_wrapper : nullptr, 
