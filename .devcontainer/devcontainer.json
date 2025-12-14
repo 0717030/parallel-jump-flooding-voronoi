@@ -11,7 +11,8 @@
         "ms-vscode.cmake-tools",
         "ms-python.python",
         "ngtystr.ppm-pgm-viewer-for-vscode",
-        "eamodio.gitlens"
+        "eamodio.gitlens",
+        "mechatroner.rainbow-csv"
       ]
     }
   },
