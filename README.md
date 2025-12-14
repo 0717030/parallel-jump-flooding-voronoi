@@ -29,9 +29,9 @@ parallel-jump-flooding-voronoi/
 ├── include/
 │   └── jfa/                # 所有 public header（給 src/* 共用）
 │       ├── types.hpp       # Config, Seed, SeedIndexBuffer, RGBImage 等 core 型別
-│       ├── cpu.hpp         # jfa_cpu_serial, jfa_cpu_omp 的宣告（CPU JFA API）
+│       ├── cpu.hpp         # jfa_cpu_serial, jfa_cpu_omp, jfa_cpu_simd, jfa_cpu_omp_simd 的宣告（CPU JFA API）
 │       ├── exact.hpp       # voronoi_exact_cpu 的宣告（exact baseline API）
-│       ├── gpu.hpp         # 之後 CUDA JFA 的宣告（現在可能先是 stub）
+│       ├── gpu.hpp         # CUDA JFA 的宣告
 │       └── visualize.hpp   # make_seed_palette, seed_index_to_rgb, write_ppm 等
 │
 ├── src/
@@ -45,13 +45,16 @@ parallel-jump-flooding-voronoi/
 │   ├── cpu/
 │   │   ├── jfa_common_impl.hpp # JFA cpu 共同邏輯（step sequence、distance 函式等）
 │   │   ├── jfa_serial.cpp      # 單執行緒 JFA 實作（jfa_cpu_serial）
-│   │   └── jfa_openmp.cpp      # OpenMP JFA 實作（jfa_cpu_omp）
+│   │   ├── jfa_openmp.cpp      # OpenMP JFA 實作（jfa_cpu_omp）
+│   │   └── jfa_simd_avx2.cpp   # AVX2 SIMD JFA 實作（jfa_cpu_simd, jfa_cpu_omp_simd）
+│   │                           # 支援 index-based 與 coord-prop 兩種模式
 │   │
 │   ├── exact/
 │   │   └── voronoi_exact.cpp   # O(N² * #seeds) 的精確 Voronoi baseline
 │   │
 │   └── gpu/
-│       └── (稍後新增 jfa_cuda_xxx.cu；現在可以留空＋README 解釋未完成)
+│       ├── jfa_cuda.cu         # CUDA JFA kernels（多種優化變體）
+│       └── jfa_gpu_wrapper.cpp # CUDA backend 的 C++ wrapper
 │
 ├── scripts/
 │   ├── run_benchmarks.py       # 跑多組 jfa_demo（serial/omp）→ 寫 results/results_jfa.csv
@@ -90,7 +93,7 @@ make -j
 
 成功後，會在 build/ 底下看到：
 * jfa_demo – main CLI 可執行檔
-* libjfa_cpu.a, libjfa_exact.a, libjfa_visualize.a – 靜態 library（被 jfa_demo link）
+* libjfa_cpu.a, libjfa_exact.a, libjfa_visualize.a, libjfa_gpu.a – 靜態 library（被 jfa_demo link）
 
 ### jfa_demo 使用方式
 
