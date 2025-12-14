@@ -1,6 +1,7 @@
 // src/cpu/jfa_openmp.cpp
 #include <jfa/cpu.hpp>
 #include "jfa_common_impl.hpp"
+#include "cpu_affinity.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -14,6 +15,9 @@ void jfa_cpu_omp(const Config& cfg,
                  int num_threads,
                  PassCallback pass_cb)
 {
+    // Set CPU affinity to P-cores only (avoid E-cores)
+    detail::set_pcore_affinity();
+    
 #ifdef _OPENMP
     if (num_threads > 0) {
         omp_set_num_threads(num_threads);
