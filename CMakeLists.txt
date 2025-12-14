@@ -15,6 +15,13 @@ add_library(jfa_cpu
     src/cpu/jfa_serial.cpp
     src/cpu/jfa_openmp.cpp
     src/cpu/jfa_common_impl.hpp
+    src/cpu/jfa_simd_avx2.cpp
+)
+
+# Compile SIMD translation unit with AVX2 enabled (scoped to this file).
+set_source_files_properties(src/cpu/jfa_simd_avx2.cpp
+    PROPERTIES
+        COMPILE_OPTIONS "-mavx2"
 )
 
 # GPU JFA library

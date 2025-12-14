@@ -15,8 +15,8 @@
 #include <jfa/visualize.hpp>
 
 struct Options {
-    std::string backend = "omp"; // "serial", "omp", or "cuda"
-    int threads = 8;             // used only for omp
+    std::string backend = "omp"; // "serial", "omp", "simd", "omp_simd", or "cuda"
+    int threads = 8;             // used for omp / omp_simd
     int width = 512;
     int height = 512;
     int num_seeds = 50;
@@ -43,16 +43,16 @@ struct Options {
 void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n"
               << "Options:\n"
-              << "  --backend {serial|omp|cuda} Select JFA implementation (default: omp)\n"
-              << "  --threads N              Number of threads for OpenMP backend (default: 8)\n"
+              << "  --backend {serial|omp|simd|omp_simd|cuda} Select JFA implementation (default: omp)\n"
+              << "  --threads N              Number of threads for OpenMP backends (omp/omp_simd) (default: 8)\n"
               << "  --block-dim N            CUDA block dimension (square, default: 16)\n"
               << "  --block-dim-x N          CUDA block dimension X (default: 16)\n"
               << "  --block-dim-y N          CUDA block dimension Y (default: 16)\n"
               << "  --ppt N                  Pixels per thread (default: 1)\n"
               << "  --use-pitch              Use cudaMallocPitch for memory alignment (default: off)\n"
               << "  --pinned                 Use cudaMallocHost for pinned memory (default: off)\n"
-              << "  --soa                    Use Structure of Arrays for seeds (default: off)\n"
-              << "  --use-coord-prop         Use Coordinate Propagation (default: off)\n"
+              << "  --soa                    Use Structure of Arrays (CUDA: seeds layout; SIMD: coord buffer layout) (default: off)\n"
+              << "  --use-coord-prop         Use Coordinate Propagation (CUDA and SIMD) (default: off)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -211,7 +211,9 @@ Options parse_args(int argc, char** argv) {
         }
     }
 
-    if (opt.backend != "serial" && opt.backend != "omp" && opt.backend != "cuda") {
+    if (opt.backend != "serial" && opt.backend != "omp" &&
+        opt.backend != "simd" && opt.backend != "omp_simd" &&
+        opt.backend != "cuda") {
         std::cerr << "Unsupported backend '" << opt.backend
                   << "', falling back to 'omp'\n";
         opt.backend = "omp";
@@ -231,7 +233,7 @@ int main(int argc, char** argv)
     if (!opt.tag.empty()) {
         std::ostringstream oss;
         oss << opt.tag << "_" << opt.backend
-            << "_t" << (opt.backend == "omp" ? opt.threads : 1)
+            << "_t" << ((opt.backend == "omp" || opt.backend == "omp_simd") ? opt.threads : 1)
             << "_" << opt.width << "x" << opt.height
             << "_s" << opt.num_seeds;
         auto_name = oss.str();
@@ -265,8 +267,11 @@ int main(int argc, char** argv)
     std::cout << "Config:\n"
               << "  backend   = " << opt.backend << "\n";
 
-    if (opt.backend == "omp") {
+    if (opt.backend == "omp" || opt.backend == "omp_simd") {
         std::cout << "  threads   = " << opt.threads << "\n";
+    } else if (opt.backend == "simd") {
+        std::cout << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
+                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
     } else if (opt.backend == "cuda") {
         std::cout << "  block_dim = " << opt.block_dim_x << "x" << opt.block_dim_y << "\n"
                   << "  ppt       = " << opt.pixels_per_thread << "\n"
@@ -298,6 +303,8 @@ int main(int argc, char** argv)
     jfa::SeedIndexBuffer exact_buf;
     jfa::SeedIndexBuffer serial_buf;
     jfa::SeedIndexBuffer omp_buf;
+    jfa::SeedIndexBuffer simd_buf;
+    jfa::SeedIndexBuffer omp_simd_buf;
 
     double exact_ms = 0;
     double serial_ms = 0;
@@ -412,6 +419,56 @@ int main(int argc, char** argv)
         parallel_ms = omp_ms;
         diff_exact_parallel = diff_exact_omp;
         diff_serial_parallel = diff_serial_omp;
+    } else if (opt.backend == "simd") {
+        auto cb = make_callback("cpu_jfa_simd");
+        auto t0 = Clock::now();
+        // SIMD backend supports two modes:
+        // - default (no --use-coord-prop): index-based SIMD (lighter memory, often better on CPU)
+        // - with --use-coord-prop: coord-prop SIMD (useful for comparison / GPU-like behavior)
+        jfa::jfa_cpu_simd(cfg, seeds, simd_buf, cb);
+        auto t1 = Clock::now();
+        double simd_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        int diff_exact_simd = opt.skip_exact ? -1 : diff_count(exact_buf, simd_buf);
+        int diff_serial_simd = opt.skip_serial ? -1 : diff_count(serial_buf, simd_buf);
+
+        std::cout << "[SIMD JFA] time = " << simd_ms << " ms";
+        if (!opt.skip_exact) std::cout << ", diff vs exact = " << diff_exact_simd;
+        if (!opt.skip_serial) std::cout << ", diff vs serial = " << diff_serial_simd;
+        std::cout << " pixels\n";
+
+        if (!opt.skip_serial) {
+            double speedup_vs_serial = serial_ms / simd_ms;
+            std::cout << "  speedup vs serial JFA = " << speedup_vs_serial << "x\n";
+        }
+
+        parallel_ms = simd_ms;
+        diff_exact_parallel = diff_exact_simd;
+        diff_serial_parallel = diff_serial_simd;
+    } else if (opt.backend == "omp_simd") {
+        auto cb = make_callback("cpu_jfa_omp_simd");
+        auto t0 = Clock::now();
+        jfa::jfa_cpu_omp_simd(cfg, seeds, omp_simd_buf, opt.threads, cb);
+        auto t1 = Clock::now();
+        double omp_simd_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        int diff_exact_tmp = opt.skip_exact ? -1 : diff_count(exact_buf, omp_simd_buf);
+        int diff_serial_tmp = opt.skip_serial ? -1 : diff_count(serial_buf, omp_simd_buf);
+
+        std::cout << "[OpenMP+SIMD JFA] threads = " << opt.threads
+                  << ", time = " << omp_simd_ms << " ms";
+        if (!opt.skip_exact) std::cout << ", diff vs exact = " << diff_exact_tmp;
+        if (!opt.skip_serial) std::cout << ", diff vs serial = " << diff_serial_tmp;
+        std::cout << " pixels\n";
+
+        if (!opt.skip_serial) {
+            double speedup_vs_serial = serial_ms / omp_simd_ms;
+            std::cout << "  speedup vs serial JFA = " << speedup_vs_serial << "x\n";
+        }
+
+        parallel_ms = omp_simd_ms;
+        diff_exact_parallel = diff_exact_tmp;
+        diff_serial_parallel = diff_serial_tmp;
     } else if (opt.backend == "cuda") {
         jfa::SeedIndexBuffer cuda_buf;
         auto cb = make_callback("gpu_jfa_cuda");
@@ -464,7 +521,7 @@ int main(int argc, char** argv)
     if (opt.csv) {
         std::cout << "CSV,"
                   << opt.backend << ","
-                  << (opt.backend == "omp" ? opt.threads : 1) << ","
+                  << ((opt.backend == "omp" || opt.backend == "omp_simd") ? opt.threads : 1) << ","
                   << cfg.width << ","
                   << cfg.height << ","
                   << opt.num_seeds << ","

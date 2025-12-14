@@ -9,7 +9,10 @@
       "extensions": [
         "ms-vscode.cpptools",
         "ms-vscode.cmake-tools",
-        "ms-python.python"
+        "ms-python.python",
+        "ngtystr.ppm-pgm-viewer-for-vscode",
+        "eamodio.gitlens",
+        "mechatroner.rainbow-csv"
       ]
     }
   },
