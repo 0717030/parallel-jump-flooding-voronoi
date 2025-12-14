@@ -103,16 +103,30 @@ cd build
 **支援的參數**
 
 （這對應你現在的 Options ＋ parse_args）
-* `--backend {serial|omp}`
+* `--backend {serial|omp|simd|omp_simd|cuda}`
     * 選擇 CPU JFA 實作：
         * serial：單執行緒 JFA
         * omp：OpenMP 多執行緒 JFA
+        * simd：AVX2 SIMD（單執行緒，使用 coordinate propagation）
+        * omp_simd：OpenMP + AVX2 SIMD（使用 coordinate propagation）
+        * cuda：CUDA 版本
     * 預設：omp
 
 * `--threads N`
     * OpenMP backend 使用的 threads 數
-    * 僅在 --backend omp 時有效
+    * 僅在 --backend omp / omp_simd 時有效
     * 預設：8
+
+* `--soa`
+    * SIMD backend：切換 internal coord buffer 的 layout
+        * off：AoS（interleaved xy）
+        * on：SoA（sx[] + sy[]，通常比較快）
+    * CUDA backend：切換 seeds layout（SoA）
+
+* `--use-coord-prop`
+    * SIMD backend：
+        * off（預設）：index-based（每個 pixel 存 seed index，CPU 上通常較省記憶體、也常更快）
+        * on：coord-prop（每個 pixel 存 seed 座標，用來和 GPU/不同資料流做比較）
 
 * `--width W` / `--height H`
     * 圖像解析度（像素）
