@@ -963,22 +963,12 @@ inline void idx_step_avx2(const Config& cfg,
         out_buf[idx] = best_seed;
     };
 
-    for (int y = 0; y < H; ++y) {
-        const bool y_interior = (y >= step) && (y < H - step);
+    auto vector_pixel_safe = [&](int& x, int x_end, int y) {
         const int row = y * W;
-
-        if (!y_interior || W < 8 || step <= 0) {
-            for (int x = 0; x < W; ++x) scalar_pixel(x, y);
-            continue;
-        }
-
-        for (int x = 0; x < step; ++x) scalar_pixel(x, y);
-
-        int x = step;
-        const int x_vec_end = (W - step) - 8;
         const __m256i yv = _mm256_set1_epi32(y);
+        const __m256i W_vec = _mm256_set1_epi32(W);
 
-        for (; x <= x_vec_end; x += 8) {
+        for (; x <= x_end; x += 8) {
             const int idx0 = row + x;
             const __m256i xv = _mm256_add_epi32(_mm256_set1_epi32(x), inc);
 
@@ -986,7 +976,6 @@ inline void idx_step_avx2(const Config& cfg,
             __m256i best_invalid = _mm256_cmpeq_epi32(best_idx, neg1);
             __m256i best_d;
             if (_mm256_movemask_epi8(best_invalid) == -1) {
-                // All lanes invalid: skip gather entirely.
                 best_d = inf;
             } else {
                 __m256i best_sx, best_sy;
@@ -994,7 +983,60 @@ inline void idx_step_avx2(const Config& cfg,
                 best_d = dist_sq_vec_seed(xv, yv, best_sx, best_sy, best_invalid);
             }
 
-            // dy=-1: dx=-1,0,1
+            for (int dy = -1; dy <= 1; ++dy) {
+                int ny_s = y + dy * step;
+                __m256i mask_y = (ny_s >= 0 && ny_s < H) ? _mm256_set1_epi32(-1) : _mm256_setzero_si256();
+                if (_mm256_movemask_epi8(mask_y) == 0) continue;
+
+                const int base = ny_s * W;
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dy == 0 && dx == 0) continue;
+
+                    __m256i nx = _mm256_add_epi32(xv, _mm256_set1_epi32(dx * step));
+                    __m256i mask_x = _mm256_and_si256(_mm256_cmpgt_epi32(nx, neg1), _mm256_cmpgt_epi32(W_vec, nx));
+                    __m256i mask = _mm256_and_si256(mask_x, mask_y);
+
+                    if (_mm256_movemask_epi8(mask) == 0) continue;
+
+                    const int offset = base + x + dx * step;
+                    const int* addr = in_buf.data() + offset;
+                    
+                    __m256i cand_idx = _mm256_maskload_epi32(addr, mask);
+                    cand_idx = _mm256_blendv_epi8(neg1, cand_idx, mask);
+
+                    __m256i inv = _mm256_cmpeq_epi32(cand_idx, neg1);
+                    if (_mm256_movemask_epi8(inv) != -1) {
+                        __m256i csx, csy;
+                        gather.gather_xy_known_mask(cand_idx, inv, csx, csy);
+                        __m256i cd = dist_sq_vec_seed(xv, yv, csx, csy, inv);
+                        update_best_idx(best_d, best_idx, cd, cand_idx);
+                    }
+                }
+            }
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_buf.data() + idx0), best_idx);
+        }
+    };
+
+    auto vector_pixel_fast = [&](int& x, int x_end, int y) {
+        const int row = y * W;
+        const __m256i yv = _mm256_set1_epi32(y);
+
+        for (; x <= x_end; x += 8) {
+            const int idx0 = row + x;
+            const __m256i xv = _mm256_add_epi32(_mm256_set1_epi32(x), inc);
+
+            __m256i best_idx = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in_buf.data() + idx0));
+            __m256i best_invalid = _mm256_cmpeq_epi32(best_idx, neg1);
+            __m256i best_d;
+            if (_mm256_movemask_epi8(best_invalid) == -1) {
+                best_d = inf;
+            } else {
+                __m256i best_sx, best_sy;
+                gather.gather_xy_known_mask(best_idx, best_invalid, best_sx, best_sy);
+                best_d = dist_sq_vec_seed(xv, yv, best_sx, best_sy, best_invalid);
+            }
+
+            // dy=-1
             {
                 const int base = (y - step) * W;
                 for (int dx = -1; dx <= 1; ++dx) {
@@ -1009,8 +1051,7 @@ inline void idx_step_avx2(const Config& cfg,
                     }
                 }
             }
-
-            // dy=0: dx=-1,+1 (skip center)
+            // dy=0
             {
                 const int base = y * W;
                 for (int dx : {-1, 1}) {
@@ -1025,8 +1066,7 @@ inline void idx_step_avx2(const Config& cfg,
                     }
                 }
             }
-
-            // dy=+1: dx=-1,0,1
+            // dy=+1
             {
                 const int base = (y + step) * W;
                 for (int dx = -1; dx <= 1; ++dx) {
@@ -1041,12 +1081,36 @@ inline void idx_step_avx2(const Config& cfg,
                     }
                 }
             }
-
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_buf.data() + idx0), best_idx);
         }
+    };
 
-        for (; x < W - step; ++x) scalar_pixel(x, y);
-        for (int xb = W - step; xb < W; ++xb) scalar_pixel(xb, y);
+    for (int y = 0; y < H; ++y) {
+        int x = 0;
+        bool y_safe = (y >= step && y < H - step);
+        int safe_x_end = (W - step) - 8;
+        
+        // 1. Left / Generic Unsafe
+        int end_left = std::min(W - 8, step);
+        if (end_left >= x) {
+             vector_pixel_safe(x, end_left, y);
+        }
+        
+        // 2. Center Safe
+        if (y_safe) {
+             if (safe_x_end >= x) {
+                 vector_pixel_fast(x, safe_x_end, y);
+             }
+        }
+        
+        // 3. Right Unsafe
+        int end_right = W - 8;
+        if (end_right >= x) {
+             vector_pixel_safe(x, end_right, y);
+        }
+        
+        // 4. Tail Scalar
+        for (; x < W; ++x) scalar_pixel(x, y);
     }
 }
 
