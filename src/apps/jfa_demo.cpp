@@ -52,7 +52,7 @@ void print_usage(const char* prog) {
               << "  --use-pitch              Use cudaMallocPitch for memory alignment (default: off)\n"
               << "  --pinned                 Use cudaMallocHost for pinned memory (default: off)\n"
               << "  --soa                    Use Structure of Arrays (CUDA: seeds layout; SIMD: coord buffer layout) (default: off)\n"
-              << "  --use-coord-prop         Use Coordinate Propagation (CUDA and SIMD) (default: off)\n"
+              << "  --use-coord-prop         Use Coordinate Propagation (CPU and CUDA) (default: off)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -267,10 +267,17 @@ int main(int argc, char** argv)
     std::cout << "Config:\n"
               << "  backend   = " << opt.backend << "\n";
 
-    if (opt.backend == "omp" || opt.backend == "omp_simd") {
-        std::cout << "  threads   = " << opt.threads << "\n";
+    if (opt.backend == "serial") {
+        std::cout << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
+    } else if (opt.backend == "omp") {
+        std::cout << "  threads   = " << opt.threads << "\n"
+                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
     } else if (opt.backend == "simd") {
         std::cout << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
+                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
+    } else if (opt.backend == "omp_simd") {
+        std::cout << "  threads   = " << opt.threads << "\n"
+                  << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
                   << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
     } else if (opt.backend == "cuda") {
         std::cout << "  block_dim = " << opt.block_dim_x << "x" << opt.block_dim_y << "\n"
