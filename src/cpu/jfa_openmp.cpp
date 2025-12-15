@@ -3,9 +3,7 @@
 #include "jfa_common_impl.hpp"
 #include "cpu_affinity.hpp"
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace jfa {
 
@@ -18,11 +16,9 @@ void jfa_cpu_omp(const Config& cfg,
     // Set CPU affinity to P-cores only (avoid E-cores)
     detail::set_pcore_affinity();
     
-#ifdef _OPENMP
     if (num_threads > 0) {
         omp_set_num_threads(num_threads);
     }
-#endif
     detail::jfa_cpu_common<true>(cfg, seeds, out_buffer, pass_cb);
 }
 

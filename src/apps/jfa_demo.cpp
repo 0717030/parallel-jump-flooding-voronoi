@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <sstream>
 #include <iomanip>
+#include <cctype>
 
 #include <jfa/types.hpp>
 #include <jfa/cpu.hpp>
@@ -36,6 +37,9 @@ struct Options {
     bool use_pinned = false;         // NEW: Use pinned memory
     bool use_soa = false;            // NEW: Use Structure of Arrays
     bool use_coord_prop = false;     // NEW: Use Coordinate Propagation
+    bool cpu_use_pitch = false;      // NEW: CPU SIMD: pad internal row stride (pitch)
+    std::string cpu_seeds_layout = "packed";   // CPU SIMD only (index-based): packed|soa|aos
+    std::string cpu_coordbuf_layout = "soa";   // CPU SIMD only (coord-prop): soa|aos
     bool skip_exact = false;         // NEW: Skip exact check
     bool skip_serial = false;        // NEW: Skip serial check
 };
@@ -51,8 +55,11 @@ void print_usage(const char* prog) {
               << "  --ppt N                  Pixels per thread (default: 1)\n"
               << "  --use-pitch              Use cudaMallocPitch for memory alignment (default: off)\n"
               << "  --pinned                 Use cudaMallocHost for pinned memory (default: off)\n"
-              << "  --soa                    Use Structure of Arrays (CUDA: seeds layout; SIMD: coord buffer layout) (default: off)\n"
+              << "  --soa                    Use Structure of Arrays (CUDA only: seeds layout) (default: off)\n"
               << "  --use-coord-prop         Use Coordinate Propagation (CPU and CUDA) (default: off)\n"
+              << "  --cpu-pitch              CPU SIMD only: pad internal row stride to align vector loads/stores (default: off)\n"
+              << "  --cpu-seeds-layout {packed|soa|aos}  CPU SIMD only (index-based mode): choose seeds gather layout (default: packed)\n"
+              << "  --cpu-coordbuf-layout {soa|aos}      CPU SIMD only (coord-prop mode): choose pixel coord buffer layout (default: soa)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -152,6 +159,22 @@ Options parse_args(int argc, char** argv) {
             opt.use_soa = true;
         } else if (arg == "--use-coord-prop") {
             opt.use_coord_prop = true;
+        } else if (arg == "--cpu-pitch") {
+            opt.cpu_use_pitch = true;
+        } else if (arg.rfind("--cpu-seeds-layout", 0) == 0) {
+            std::string v;
+            if (!get_value(v)) {
+                std::cerr << "Missing value for --cpu-seeds-layout\n";
+                std::exit(1);
+            }
+            opt.cpu_seeds_layout = v;
+        } else if (arg.rfind("--cpu-coordbuf-layout", 0) == 0) {
+            std::string v;
+            if (!get_value(v)) {
+                std::cerr << "Missing value for --cpu-coordbuf-layout\n";
+                std::exit(1);
+            }
+            opt.cpu_coordbuf_layout = v;
         } else if (arg == "--skip-check") {
             opt.skip_exact = true;
             opt.skip_serial = true;
@@ -263,6 +286,31 @@ int main(int argc, char** argv)
     cfg.use_pitch = opt.use_pitch;
     cfg.use_soa = opt.use_soa;
     cfg.use_coord_prop = opt.use_coord_prop;
+    cfg.cpu_use_pitch = opt.cpu_use_pitch;
+
+    // CPU SIMD-only layouts (do not reuse cfg.use_soa to avoid semantic confusion)
+    auto lower = [](std::string s) {
+        for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    {
+        const std::string seeds_layout = lower(opt.cpu_seeds_layout);
+        if (seeds_layout == "packed") cfg.cpu_seeds_layout = jfa::CpuSeedsLayout::Packed;
+        else if (seeds_layout == "soa") cfg.cpu_seeds_layout = jfa::CpuSeedsLayout::SoA;
+        else if (seeds_layout == "aos") cfg.cpu_seeds_layout = jfa::CpuSeedsLayout::AoS;
+        else {
+            std::cerr << "Invalid --cpu-seeds-layout: " << opt.cpu_seeds_layout << " (use packed|soa|aos)\n";
+            std::exit(1);
+        }
+
+        const std::string coordbuf_layout = lower(opt.cpu_coordbuf_layout);
+        if (coordbuf_layout == "soa") cfg.cpu_coordbuf_layout = jfa::CpuCoordBufLayout::SoA;
+        else if (coordbuf_layout == "aos") cfg.cpu_coordbuf_layout = jfa::CpuCoordBufLayout::AoS;
+        else {
+            std::cerr << "Invalid --cpu-coordbuf-layout: " << opt.cpu_coordbuf_layout << " (use soa|aos)\n";
+            std::exit(1);
+        }
+    }
 
     std::cout << "Config:\n"
               << "  backend   = " << opt.backend << "\n";
@@ -273,12 +321,16 @@ int main(int argc, char** argv)
         std::cout << "  threads   = " << opt.threads << "\n"
                   << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
     } else if (opt.backend == "simd") {
-        std::cout << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
-                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
+        std::cout << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n"
+                  << "  cpu_pitch = " << (opt.cpu_use_pitch ? "yes" : "no") << "\n"
+                  << "  cpu_seeds_layout   = " << opt.cpu_seeds_layout << "\n"
+                  << "  cpu_coordbuf_layout= " << opt.cpu_coordbuf_layout << "\n";
     } else if (opt.backend == "omp_simd") {
         std::cout << "  threads   = " << opt.threads << "\n"
-                  << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
-                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
+                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n"
+                  << "  cpu_pitch = " << (opt.cpu_use_pitch ? "yes" : "no") << "\n"
+                  << "  cpu_seeds_layout   = " << opt.cpu_seeds_layout << "\n"
+                  << "  cpu_coordbuf_layout= " << opt.cpu_coordbuf_layout << "\n";
     } else if (opt.backend == "cuda") {
         std::cout << "  block_dim = " << opt.block_dim_x << "x" << opt.block_dim_y << "\n"
                   << "  ppt       = " << opt.pixels_per_thread << "\n"
