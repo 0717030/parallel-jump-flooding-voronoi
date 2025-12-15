@@ -50,3 +50,4 @@ inline void set_pcore_affinity()
 } // namespace detail
 } // namespace jfa
 
+
