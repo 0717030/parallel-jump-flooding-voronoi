@@ -6,6 +6,7 @@ RUN apt-get update && \
         python3-pip python3-venv python3-dev \
         ffmpeg \
         ca-certificates curl gnupg \
+        linux-tools-common \
     && rm -rf /var/lib/apt/lists/*
 
 # CUDA Toolkit (nvcc) for building CMake CUDA language targets inside the container.
