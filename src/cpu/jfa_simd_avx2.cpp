@@ -33,19 +33,6 @@ namespace {
 constexpr int INVALID_COORD = -1;
 constexpr int DIST_INF = 0x3fffffff;
 
-inline bool cpu_has_avx2()
-{
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-    #if defined(__GNUC__) || defined(__clang__)
-        return __builtin_cpu_supports("avx2");
-    #else
-        return true; // best effort
-    #endif
-#else
-    return false;
-#endif
-}
-
 inline int sq_dist_i32(int x, int y, int sx, int sy)
 {
     if (sx == INVALID_COORD) return DIST_INF;
@@ -1462,9 +1449,8 @@ void jfa_cpu_simd(const Config& cfg,
     // EXPERIMENTAL: Disabled because it turned out to be slower than Index-based gather 
     // (L1 cache gather is faster than unpack/blend overhead).
     bool use_packed = false; 
-    /* !cfg.use_coord_prop && !cfg.use_soa && 
-                      (cfg.width < 32768 && cfg.height < 32768) &&
-                      cpu_has_avx2(); */
+    /* !cfg.use_coord_prop && !cfg.use_soa &&
+                      (cfg.width < 32768 && cfg.height < 32768); */
 
     if (use_packed) {
         // Packed Coordinate Path
@@ -1587,7 +1573,6 @@ void jfa_cpu_simd(const Config& cfg,
         int step = max_dim / 2;
         if (step <= 0) step = 1;
 
-        const bool has_avx2 = cpu_has_avx2();
         bool fromA = true;
         int pass_idx = 0;
 
@@ -1595,11 +1580,7 @@ void jfa_cpu_simd(const Config& cfg,
             const SeedIndexBuffer& in = fromA ? bufA : bufB;
             SeedIndexBuffer& out = fromA ? bufB : bufA;
 
-            if (has_avx2) {
-                idx_step_avx2(cfg, seeds, gather, in, out, step);
-            } else {
-                idx_step_scalar(cfg, seeds, in, out, step);
-            }
+            idx_step_avx2(cfg, seeds, gather, in, out, step);
 
             if (pass_cb) {
                 pass_cb(pass_idx, step, out);
@@ -1657,11 +1638,7 @@ void jfa_cpu_simd(const Config& cfg,
             int* sx_out = fromA ? sxB.data() : sxA.data();
             int* sy_out = fromA ? syB.data() : syA.data();
 
-            if (cpu_has_avx2()) {
-                coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
-            } else {
-                coord_step_scalar_soa(cfg, sx_in, sy_in, sx_out, sy_out, step);
-            }
+            coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
 
             if (pass_cb) {
                 const auto& sx_cur = fromA ? sxB : sxA;
@@ -1699,11 +1676,7 @@ void jfa_cpu_simd(const Config& cfg,
         const int* in = fromA ? xyA.data() : xyB.data();
         int* out = fromA ? xyB.data() : xyA.data();
 
-        if (cpu_has_avx2()) {
-            coord_step_aos_avx2<false>(cfg, in, out, step);
-        } else {
-            coord_step_scalar_aos(cfg, in, out, step);
-        }
+        coord_step_aos_avx2<false>(cfg, in, out, step);
 
         if (pass_cb) {
             const auto& cur = fromA ? xyB : xyA;
@@ -1777,8 +1750,6 @@ void jfa_cpu_omp_simd(const Config& cfg,
             gather.seeds_xy = reinterpret_cast<const int*>(seeds.data());
         }
 
-        const bool has_avx2 = cpu_has_avx2();
-
 #if defined(_OPENMP)
         #pragma omp parallel
         {
@@ -1788,37 +1759,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
                 const SeedIndexBuffer& in = fromA ? bufA : bufB;
                 SeedIndexBuffer& out = fromA ? bufB : bufA;
 
-                if (has_avx2) {
-                    idx_step_avx2_omp_for(cfg, seeds, gather, in, out, step);
-                } else {
-                    // Scalar fallback still parallel over rows.
-                    #pragma omp for schedule(static)
-                    for (int y = 0; y < H; ++y) {
-                        for (int x = 0; x < W; ++x) {
-                            const int idx = y * W + x;
-                            int best_seed = in[idx];
-                            int best_d = sq_dist_seed_scalar(x, y, best_seed, seeds);
-
-                            for (int dy = -1; dy <= 1; ++dy) {
-                                for (int dx = -1; dx <= 1; ++dx) {
-                                    const int nx = x + dx * step;
-                                    const int ny = y + dy * step;
-                                    if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-                                    const int nidx = ny * W + nx;
-                                    const int cand_seed = in[nidx];
-                                    if (cand_seed < 0) continue;
-                                    const int d = sq_dist_seed_scalar(x, y, cand_seed, seeds);
-                                    if (d < best_d) {
-                                        best_d = d;
-                                        best_seed = cand_seed;
-                                    }
-                                }
-                            }
-
-                            out[idx] = best_seed;
-                        }
-                    }
-                }
+                idx_step_avx2_omp_for(cfg, seeds, gather, in, out, step);
 
                 #pragma omp single
                 {
@@ -1862,8 +1803,6 @@ void jfa_cpu_omp_simd(const Config& cfg,
         }
     }
 
-    const bool has_avx2 = cpu_has_avx2();
-
     if (use_soa) {
         std::vector<int> sxA(N, INVALID_COORD), syA(N, INVALID_COORD);
         std::vector<int> sxB(N, INVALID_COORD), syB(N, INVALID_COORD);
@@ -1889,40 +1828,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
                 int* sx_out = fromA ? sxB.data() : sxA.data();
                 int* sy_out = fromA ? syB.data() : syA.data();
 
-                if (has_avx2) {
-                    coord_step_soa_avx2_omp_for(cfg, sx_in, sy_in, sx_out, sy_out, step);
-                } else {
-                    // Scalar fallback still parallel over rows.
-                    #pragma omp for schedule(static)
-                    for (int y = 0; y < H; ++y) {
-                        for (int x = 0; x < W; ++x) {
-                            const int idx = y * W + x;
-                            int best_sx = sx_in[idx];
-                            int best_sy = sy_in[idx];
-                            int best_d  = sq_dist_i32(x, y, best_sx, best_sy);
-
-                            for (int dy = -1; dy <= 1; ++dy) {
-                                for (int dx = -1; dx <= 1; ++dx) {
-                                    const int nx = x + dx * step;
-                                    const int ny = y + dy * step;
-                                    if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-                                    const int nidx = ny * W + nx;
-                                    const int csx = sx_in[nidx];
-                                    if (csx == INVALID_COORD) continue;
-                                    const int csy = sy_in[nidx];
-                                    const int d = sq_dist_i32(x, y, csx, csy);
-                                    if (d < best_d) {
-                                        best_d = d;
-                                        best_sx = csx;
-                                        best_sy = csy;
-                                    }
-                                }
-                            }
-                            sx_out[idx] = best_sx;
-                            sy_out[idx] = best_sy;
-                        }
-                    }
-                }
+                coord_step_soa_avx2_omp_for(cfg, sx_in, sy_in, sx_out, sy_out, step);
 
                 #pragma omp single
                 {
@@ -1945,8 +1851,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
             const int* sy_in = fromA ? syA.data() : syB.data();
             int* sx_out = fromA ? sxB.data() : sxA.data();
             int* sy_out = fromA ? syB.data() : syA.data();
-            if (has_avx2) coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
-            else coord_step_scalar_soa(cfg, sx_in, sy_in, sx_out, sy_out, step);
+            coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
             if (pass_cb) {
                 const auto& sx_cur = fromA ? sxB : sxA;
                 const auto& sy_cur = fromA ? syB : syA;
@@ -1985,42 +1890,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
             const int* in = fromA ? xyA.data() : xyB.data();
             int* out = fromA ? xyB.data() : xyA.data();
 
-            if (has_avx2) {
-                coord_step_aos_avx2_omp_for(cfg, in, out, step);
-            } else {
-                #pragma omp for schedule(static)
-                for (int y = 0; y < H; ++y) {
-                    for (int x = 0; x < W; ++x) {
-                        const int idx = y * W + x;
-                        const int base = 2 * idx;
-                        int best_sx = in[base + 0];
-                        int best_sy = in[base + 1];
-                        int best_d  = sq_dist_i32(x, y, best_sx, best_sy);
-
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                const int nx = x + dx * step;
-                                const int ny = y + dy * step;
-                                if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-                                const int nidx = ny * W + nx;
-                                const int nbase = 2 * nidx;
-                                const int csx = in[nbase + 0];
-                                if (csx == INVALID_COORD) continue;
-                                const int csy = in[nbase + 1];
-                                const int d = sq_dist_i32(x, y, csx, csy);
-                                if (d < best_d) {
-                                    best_d = d;
-                                    best_sx = csx;
-                                    best_sy = csy;
-                                }
-                            }
-                        }
-
-                        out[base + 0] = best_sx;
-                        out[base + 1] = best_sy;
-                    }
-                }
-            }
+            coord_step_aos_avx2_omp_for(cfg, in, out, step);
 
             #pragma omp single
             {
@@ -2039,8 +1909,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
         const bool fromA = (pass_idx % 2 == 0);
         const int* in = fromA ? xyA.data() : xyB.data();
         int* out = fromA ? xyB.data() : xyA.data();
-        if (has_avx2) coord_step_aos_avx2<false>(cfg, in, out, step);
-        else coord_step_scalar_aos(cfg, in, out, step);
+        coord_step_aos_avx2<false>(cfg, in, out, step);
         if (pass_cb) {
             const auto& cur = fromA ? xyB : xyA;
             coordbuf_to_seed_indices_aos(cfg, cur, id_map, tmp_indices);
