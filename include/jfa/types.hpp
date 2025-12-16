@@ -18,8 +18,9 @@ enum class CpuSeedsLayout {
 };
 
 enum class CpuCoordBufLayout {
-    SoA, // per-pixel buffers: sx[], sy[]
-    AoS, // per-pixel buffer: xy[] interleaved [sx,sy,sx,sy,...]
+    SoA,    // per-pixel buffers: sx[], sy[]
+    AoS,    // per-pixel buffer: xy[] interleaved [sx,sy,sx,sy,...]
+    Packed, // per-pixel buffer: packed int32/uint32 = (y<<16)|x, help reduce bandwidth (coord-prop only)
 };
 
 struct Color {

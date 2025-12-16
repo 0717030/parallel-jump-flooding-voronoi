@@ -39,7 +39,7 @@ struct Options {
     bool use_coord_prop = false;     // NEW: Use Coordinate Propagation
     bool cpu_use_pitch = false;      // NEW: CPU SIMD: pad internal row stride (pitch)
     std::string cpu_seeds_layout = "packed";   // CPU SIMD only (index-based): packed|soa|aos
-    std::string cpu_coordbuf_layout = "soa";   // CPU SIMD only (coord-prop): soa|aos
+    std::string cpu_coordbuf_layout = "soa";   // CPU SIMD only (coord-prop): soa|aos|packed
     bool skip_exact = false;         // NEW: Skip exact check
     bool skip_serial = false;        // NEW: Skip serial check
 };
@@ -59,7 +59,7 @@ void print_usage(const char* prog) {
               << "  --use-coord-prop         Use Coordinate Propagation (CPU and CUDA) (default: off)\n"
               << "  --cpu-pitch              CPU SIMD only: pad internal row stride to align vector loads/stores (default: off)\n"
               << "  --cpu-seeds-layout {packed|soa|aos}  CPU SIMD only (index-based mode): choose seeds gather layout (default: packed)\n"
-              << "  --cpu-coordbuf-layout {soa|aos}      CPU SIMD only (coord-prop mode): choose pixel coord buffer layout (default: soa)\n"
+              << "  --cpu-coordbuf-layout {soa|aos|packed} CPU SIMD only (coord-prop mode): choose pixel coord buffer layout (default: soa)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -306,8 +306,9 @@ int main(int argc, char** argv)
         const std::string coordbuf_layout = lower(opt.cpu_coordbuf_layout);
         if (coordbuf_layout == "soa") cfg.cpu_coordbuf_layout = jfa::CpuCoordBufLayout::SoA;
         else if (coordbuf_layout == "aos") cfg.cpu_coordbuf_layout = jfa::CpuCoordBufLayout::AoS;
+        else if (coordbuf_layout == "packed") cfg.cpu_coordbuf_layout = jfa::CpuCoordBufLayout::Packed;
         else {
-            std::cerr << "Invalid --cpu-coordbuf-layout: " << opt.cpu_coordbuf_layout << " (use soa|aos)\n";
+            std::cerr << "Invalid --cpu-coordbuf-layout: " << opt.cpu_coordbuf_layout << " (use soa|aos|packed)\n";
             std::exit(1);
         }
     }
