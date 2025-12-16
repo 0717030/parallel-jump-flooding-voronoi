@@ -15,22 +15,25 @@ namespace jfa {
 namespace detail {
 
 // Set CPU affinity to P-cores only.
-// For i7-12700: 8 P-cores (typically cores 0-7), 4 E-cores (typically cores 8-11).
+// For i7-12700: 8 physical P-cores, each with 2 hyperthreads.
 // This function pins the current thread and all future OpenMP threads to P-cores.
+// Uses 8 different physical cores (one thread per physical core) for optimal performance.
 inline void set_pcore_affinity()
 {
 #ifdef __linux__
-    // For i7-12700: P-cores are typically cores 0-7 (8 cores)
-    // We'll use cores 0-7 as P-cores
-    const int num_pcores = 8;
-    const int first_pcore = 0;
+    // For i7-12700: Use 8 different physical P-cores
+    // Physical cores: 0->CPU 0,1 | 1->CPU 2,3 | 2->CPU 4,5 | 3->CPU 6,7
+    //                 4->CPU 8,9 | 5->CPU 10,11 | 6->CPU 12,13 | 7->CPU 14,15
+    // We select one logical CPU from each physical core: 0, 2, 4, 6, 8, 10, 12, 14
+    const int pcore_cpus[] = {0, 2, 4, 6, 8, 10, 12, 14};
+    const int num_pcores = sizeof(pcore_cpus) / sizeof(pcore_cpus[0]);
     
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     
-    // Set affinity to P-cores only (cores 0-7)
+    // Set affinity to 8 different physical P-cores
     for (int i = 0; i < num_pcores; ++i) {
-        CPU_SET(first_pcore + i, &cpuset);
+        CPU_SET(pcore_cpus[i], &cpuset);
     }
     
     // Set affinity for the current thread
