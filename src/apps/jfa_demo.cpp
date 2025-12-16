@@ -36,8 +36,15 @@ struct Options {
     bool use_pinned = false;         // NEW: Use pinned memory
     bool use_soa = false;            // NEW: Use Structure of Arrays
     bool use_coord_prop = false;     // NEW: Use Coordinate Propagation
+    bool use_ldg = false;            // NEW: Use __ldg() intrinsic
+    bool use_restrict = false;       // NEW: Use __restrict__ keyword
+    bool use_fma = false;            // NEW: Use fmaf() intrinsic
+    bool use_ultimate = false;       // NEW: Use ultimate intrinsics
+    bool use_int_math = false;       // NEW: Use integer math
+    bool use_manhattan = false;      // NEW: Use Manhattan distance
     bool skip_exact = false;         // NEW: Skip exact check
     bool skip_serial = false;        // NEW: Skip serial check
+    bool no_warmup = false;          // NEW: Disable CUDA warmup
 };
 
 void print_usage(const char* prog) {
@@ -53,6 +60,12 @@ void print_usage(const char* prog) {
               << "  --pinned                 Use cudaMallocHost for pinned memory (default: off)\n"
               << "  --soa                    Use Structure of Arrays (CUDA: seeds layout; SIMD: coord buffer layout) (default: off)\n"
               << "  --use-coord-prop         Use Coordinate Propagation (CUDA and SIMD) (default: off)\n"
+              << "  --use-ldg                Use __ldg() intrinsic (CUDA only) (default: off)\n"
+              << "  --use-restrict           Use __restrict__ keyword (CUDA only) (default: off)\n"
+              << "  --use-fma                Use fmaf() intrinsic (CUDA only) (default: off)\n"
+              << "  --ultimate               Use combined intrinsics (__restrict__, __ldg, fmaf) (CUDA only)\n"
+              << "  --int-math               Use integer math instead of float (CUDA only)\n"
+              << "  --manhattan              Use Manhattan distance (__sad) (CUDA only)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -63,6 +76,7 @@ void print_usage(const char* prog) {
               << "  --skip-check             Skip both exact and serial verification (for large scale bench)\n"
               << "  --skip-exact             Skip exact verification (for large scale bench)\n"
               << "  --skip-serial            Skip serial verification (for large scale bench)\n"
+              << "  --no-warmup              Disable CUDA warmup (include context init time in Alloc)\n"
               << "  --output-dir DIR        Directory to store PPM frames (default: output)\n" // NEW
               << "  --csv                    Also print a machine-readable CSV summary line\n" // NEW
               << "  --tag NAME               Logical name of this run; used in auto output folder\n" // NEW
@@ -152,6 +166,21 @@ Options parse_args(int argc, char** argv) {
             opt.use_soa = true;
         } else if (arg == "--use-coord-prop") {
             opt.use_coord_prop = true;
+        } else if (arg == "--use-ldg") {
+            opt.use_ldg = true;
+        } else if (arg == "--use-restrict") {
+            opt.use_restrict = true;
+        } else if (arg == "--use-fma") {
+            opt.use_fma = true;
+        } else if (arg == "--ultimate") {
+            opt.use_ultimate = true;
+            // opt.use_coord_prop = true; // Decoupled: Allow ultimate without coord prop
+        } else if (arg == "--int-math") {
+            opt.use_int_math = true;
+            // opt.use_coord_prop = true; // Decoupled
+        } else if (arg == "--manhattan") {
+            opt.use_manhattan = true;
+            // opt.use_coord_prop = true; // Decoupled
         } else if (arg == "--skip-check") {
             opt.skip_exact = true;
             opt.skip_serial = true;
@@ -159,6 +188,8 @@ Options parse_args(int argc, char** argv) {
             opt.skip_exact = true;
         } else if (arg == "--skip-serial") {
             opt.skip_serial = true;
+        } else if (arg == "--no-warmup") {
+            opt.no_warmup = true;
         } else if (arg.rfind("--width", 0) == 0) {
             std::string v;
             if (!get_value(v) || !parse_int(v, opt.width) || opt.width <= 0) {
@@ -263,6 +294,12 @@ int main(int argc, char** argv)
     cfg.use_pitch = opt.use_pitch;
     cfg.use_soa = opt.use_soa;
     cfg.use_coord_prop = opt.use_coord_prop;
+    cfg.use_ldg = opt.use_ldg;
+    cfg.use_restrict = opt.use_restrict;
+    cfg.use_fma = opt.use_fma;
+    cfg.use_ultimate = opt.use_ultimate;
+    cfg.use_int_math = opt.use_int_math;
+    cfg.use_manhattan = opt.use_manhattan;
 
     std::cout << "Config:\n"
               << "  backend   = " << opt.backend << "\n";
@@ -279,6 +316,10 @@ int main(int argc, char** argv)
                   << "  pinned    = " << (opt.use_pinned ? "yes" : "no") << "\n"
                   << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
                   << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n"
+                  << "  use_ldg   = " << (opt.use_ldg ? "yes" : "no") << "\n"
+                  << "  ultimate  = " << (opt.use_ultimate ? "yes" : "no") << "\n"
+                  << "  int_math  = " << (opt.use_int_math ? "yes" : "no") << "\n"
+                  << "  manhattan = " << (opt.use_manhattan ? "yes" : "no") << "\n"
                   << "  shared_mem= " << (opt.use_shared_mem ? "yes" : "no") << "\n"
                   << "  const_mem = " << (opt.use_constant_mem ? "yes" : "no") << "\n";
     }
@@ -472,6 +513,12 @@ int main(int argc, char** argv)
     } else if (opt.backend == "cuda") {
         jfa::SeedIndexBuffer cuda_buf;
         auto cb = make_callback("gpu_jfa_cuda");
+
+        // Warmup CUDA context
+        if (!opt.no_warmup) {
+            jfa::cuda_warmup();
+        }
+
         auto t0 = Clock::now();
         try {
             if (opt.use_pinned) {

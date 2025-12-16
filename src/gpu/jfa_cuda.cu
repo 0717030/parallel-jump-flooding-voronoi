@@ -181,6 +181,216 @@ __device__ inline void process_pixel(int x, int y, int width, int height, int st
     out_buf[idx] = best_seed_idx;
 }
 
+// Helper device function to process one pixel with intrinsics (No Coord Prop)
+__device__ inline void process_pixel_ultimate(int x, int y, int width, int height, int step, 
+                                     const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                     const GPUSeed* __restrict__ seeds) 
+{
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = __ldg(&in_buf[idx]);
+    float best_dist = 1e30f; // Infinity
+
+    if (best_seed_idx != -1) {
+        // __ldg only supports built-in types. We need to cast or read members individually.
+        // Since GPUSeed is just {int x, y}, we can read it as int2 if aligned, or just read members.
+        // But seeds array is GPUSeed*.
+        // Let's read members manually using __ldg on int* cast.
+        const int* seeds_ptr = (const int*)seeds;
+        int sx = __ldg(&seeds_ptr[best_seed_idx * 2]);
+        int sy = __ldg(&seeds_ptr[best_seed_idx * 2 + 1]);
+        float dx = (float)(x - sx);
+        float dy = (float)(y - sy);
+        best_dist = fmaf(dx, dx, dy * dy);
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * width + nx;
+                int neighbor_seed_idx = __ldg(&in_buf[n_idx]);
+
+                if (neighbor_seed_idx != -1) {
+                    const int* seeds_ptr = (const int*)seeds;
+                    int sx = __ldg(&seeds_ptr[neighbor_seed_idx * 2]);
+                    int sy = __ldg(&seeds_ptr[neighbor_seed_idx * 2 + 1]);
+                    float dist_x = (float)(x - sx);
+                    float dist_y = (float)(y - sy);
+                    float dist_sq = fmaf(dist_x, dist_x, dist_y * dist_y);
+
+                    if (dist_sq < best_dist) {
+                        best_dist = dist_sq;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
+// Helper device function to process one pixel with __restrict__
+__device__ inline void process_pixel_restrict(int x, int y, int width, int height, int step, 
+                                     const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                     const GPUSeed* __restrict__ seeds) 
+{
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = in_buf[idx];
+    float best_dist = 1e30f; // Infinity
+
+    if (best_seed_idx != -1) {
+        GPUSeed s = seeds[best_seed_idx];
+        float dx = (float)(x - s.x);
+        float dy = (float)(y - s.y);
+        best_dist = dx * dx + dy * dy;
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * width + nx;
+                int neighbor_seed_idx = in_buf[n_idx];
+
+                if (neighbor_seed_idx != -1) {
+                    GPUSeed s = seeds[neighbor_seed_idx];
+                    float dist_x = (float)(x - s.x);
+                    float dist_y = (float)(y - s.y);
+                    float dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                    if (dist_sq < best_dist) {
+                        best_dist = dist_sq;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
+// Helper device function to process one pixel with __ldg
+__device__ inline void process_pixel_ldg(int x, int y, int width, int height, int step, 
+                                     const int* in_buf, int* out_buf, 
+                                     const GPUSeed* seeds) 
+{
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = __ldg(&in_buf[idx]);
+    float best_dist = 1e30f; // Infinity
+
+    if (best_seed_idx != -1) {
+        const int* seeds_ptr = (const int*)seeds;
+        int sx = __ldg(&seeds_ptr[best_seed_idx * 2]);
+        int sy = __ldg(&seeds_ptr[best_seed_idx * 2 + 1]);
+        float dx = (float)(x - sx);
+        float dy = (float)(y - sy);
+        best_dist = dx * dx + dy * dy;
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * width + nx;
+                int neighbor_seed_idx = __ldg(&in_buf[n_idx]);
+
+                if (neighbor_seed_idx != -1) {
+                    const int* seeds_ptr = (const int*)seeds;
+                    int sx = __ldg(&seeds_ptr[neighbor_seed_idx * 2]);
+                    int sy = __ldg(&seeds_ptr[neighbor_seed_idx * 2 + 1]);
+                    float dist_x = (float)(x - sx);
+                    float dist_y = (float)(y - sy);
+                    float dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                    if (dist_sq < best_dist) {
+                        best_dist = dist_sq;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
+// Helper device function to process one pixel with fmaf
+__device__ inline void process_pixel_fma(int x, int y, int width, int height, int step, 
+                                     const int* in_buf, int* out_buf, 
+                                     const GPUSeed* seeds) 
+{
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = in_buf[idx];
+    float best_dist = 1e30f; // Infinity
+
+    if (best_seed_idx != -1) {
+        GPUSeed s = seeds[best_seed_idx];
+        float dx = (float)(x - s.x);
+        float dy = (float)(y - s.y);
+        best_dist = fmaf(dx, dx, dy * dy);
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * width + nx;
+                int neighbor_seed_idx = in_buf[n_idx];
+
+                if (neighbor_seed_idx != -1) {
+                    GPUSeed s = seeds[neighbor_seed_idx];
+                    float dist_x = (float)(x - s.x);
+                    float dist_y = (float)(y - s.y);
+                    float dist_sq = fmaf(dist_x, dist_x, dist_y * dist_y);
+
+                    if (dist_sq < best_dist) {
+                        best_dist = dist_sq;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
 // Helper device function to process one pixel (SoA version)
 __device__ inline void process_pixel_soa(int x, int y, int width, int height, int step, 
                                      const int* in_buf, int* out_buf, 
@@ -318,6 +528,206 @@ __global__ void place_seeds_kernel_coord(short2* buffer, const GPUSeed* seeds, i
         // No race condition here if seeds are unique locations.
         // If multiple seeds at same location, last one wins (arbitrary).
         buffer[s.y * width + s.x] = make_short2((short)s.x, (short)s.y);
+    }
+}
+
+__global__ void jfa_step_kernel_int_math(const short2* __restrict__ in_buf, 
+                                         short2* __restrict__ out_buf,
+                                         int width, int height, int step, int ppt)
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * ppt;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < ppt; ++i) {
+        int x = start_x + i;
+        if (x >= width || y >= height) continue;
+
+        int idx = y * width + x;
+        short2 best_seed = __ldg(&in_buf[idx]);
+        int best_dist = 2000000000; // Max int approx
+
+        if (best_seed.x != -1) {
+            int dx = x - best_seed.x;
+            int dy = y - best_seed.y;
+            best_dist = dx * dx + dy * dy;
+        }
+
+        #pragma unroll
+        for (int dy = -1; dy <= 1; ++dy) {
+            #pragma unroll
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+
+                int nx = x + dx * step;
+                int ny = y + dy * step;
+
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    int n_idx = ny * width + nx;
+                    short2 neighbor_seed = __ldg(&in_buf[n_idx]);
+
+                    if (neighbor_seed.x != -1) {
+                        int dist_x = x - neighbor_seed.x;
+                        int dist_y = y - neighbor_seed.y;
+                        int dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                        if (dist_sq < best_dist) {
+                            best_dist = dist_sq;
+                            best_seed = neighbor_seed;
+                        }
+                    }
+                }
+            }
+        }
+        out_buf[idx] = best_seed;
+    }
+}
+
+__global__ void jfa_step_kernel_manhattan(const short2* __restrict__ in_buf, 
+                                          short2* __restrict__ out_buf,
+                                          int width, int height, int step, int ppt)
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * ppt;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < ppt; ++i) {
+        int x = start_x + i;
+        if (x >= width || y >= height) continue;
+
+        int idx = y * width + x;
+        short2 best_seed = __ldg(&in_buf[idx]);
+        int best_dist = 2000000000;
+
+        if (best_seed.x != -1) {
+            // __sad(a, b, c) = |a - b| + c
+            best_dist = __sad(x, best_seed.x, __sad(y, best_seed.y, 0));
+        }
+
+        #pragma unroll
+        for (int dy = -1; dy <= 1; ++dy) {
+            #pragma unroll
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+
+                int nx = x + dx * step;
+                int ny = y + dy * step;
+
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    int n_idx = ny * width + nx;
+                    short2 neighbor_seed = __ldg(&in_buf[n_idx]);
+
+                    if (neighbor_seed.x != -1) {
+                        int dist = __sad(x, neighbor_seed.x, __sad(y, neighbor_seed.y, 0));
+
+                        if (dist < best_dist) {
+                            best_dist = dist;
+                            best_seed = neighbor_seed;
+                        }
+                    }
+                }
+            }
+        }
+        out_buf[idx] = best_seed;
+    }
+}
+
+__global__ void jfa_step_kernel_ultimate(const short2* __restrict__ in_buf, 
+                                         short2* __restrict__ out_buf,
+                                         int width, int height, int step, int ppt)
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * ppt;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < ppt; ++i) {
+        int x = start_x + i;
+        if (x >= width || y >= height) continue;
+
+        int idx = y * width + x;
+        short2 best_seed = __ldg(&in_buf[idx]);
+        float best_dist = 1e30f;
+
+        if (best_seed.x != -1) {
+            float dx = (float)(x - best_seed.x);
+            float dy = (float)(y - best_seed.y);
+            best_dist = fmaf(dx, dx, dy * dy);
+        }
+
+        #pragma unroll
+        for (int dy = -1; dy <= 1; ++dy) {
+            #pragma unroll
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+
+                int nx = x + dx * step;
+                int ny = y + dy * step;
+
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    int n_idx = ny * width + nx;
+                    short2 neighbor_seed = __ldg(&in_buf[n_idx]);
+
+                    if (neighbor_seed.x != -1) {
+                        float dist_x = (float)(x - neighbor_seed.x);
+                        float dist_y = (float)(y - neighbor_seed.y);
+                        float dist_sq = fmaf(dist_x, dist_x, dist_y * dist_y);
+
+                        if (dist_sq < best_dist) {
+                            best_dist = dist_sq;
+                            best_seed = neighbor_seed;
+                        }
+                    }
+                }
+            }
+        }
+        out_buf[idx] = best_seed;
+    }
+}
+
+__global__ void jfa_step_kernel_coord_ldg(const short2* in_buf, short2* out_buf,
+                                      int width, int height, int step, int ppt)
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * ppt;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < ppt; ++i) {
+        int x = start_x + i;
+        if (x >= width || y >= height) continue;
+
+        int idx = y * width + x;
+        short2 best_seed = __ldg(&in_buf[idx]);
+        float best_dist = 1e30f;
+
+        if (best_seed.x != -1) {
+            float dx = (float)(x - best_seed.x);
+            float dy = (float)(y - best_seed.y);
+            best_dist = dx * dx + dy * dy;
+        }
+
+        #pragma unroll
+        for (int dy = -1; dy <= 1; ++dy) {
+            #pragma unroll
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+
+                int nx = x + dx * step;
+                int ny = y + dy * step;
+
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    int n_idx = ny * width + nx;
+                    short2 neighbor_seed = __ldg(&in_buf[n_idx]);
+
+                    if (neighbor_seed.x != -1) {
+                        float dist_x = (float)(x - neighbor_seed.x);
+                        float dist_y = (float)(y - neighbor_seed.y);
+                        float dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                        if (dist_sq < best_dist) {
+                            best_dist = dist_sq;
+                            best_seed = neighbor_seed;
+                        }
+                    }
+                }
+            }
+        }
+        out_buf[idx] = best_seed;
     }
 }
 
@@ -598,6 +1008,198 @@ __global__ void jfa_step_kernel_constant(const int* in_buf, int* out_buf,
     }
 }
 
+// JFA Step Kernel with Ultimate Intrinsics (No Coord Prop)
+__global__ void jfa_step_kernel_ultimate_no_coord(const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                const GPUSeed* __restrict__ seeds, 
+                                int width, int height, int step,
+                                int pixels_per_thread) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_ultimate(x, y, width, height, step, in_buf, out_buf, seeds);
+    }
+}
+
+__global__ void jfa_step_kernel_restrict(const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                const GPUSeed* __restrict__ seeds, 
+                                int width, int height, int step,
+                                int pixels_per_thread) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_restrict(x, y, width, height, step, in_buf, out_buf, seeds);
+    }
+}
+
+__global__ void jfa_step_kernel_ldg_no_coord(const int* in_buf, int* out_buf, 
+                                const GPUSeed* seeds, 
+                                int width, int height, int step,
+                                int pixels_per_thread) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_ldg(x, y, width, height, step, in_buf, out_buf, seeds);
+    }
+}
+
+__global__ void jfa_step_kernel_fma_no_coord(const int* in_buf, int* out_buf, 
+                                const GPUSeed* seeds, 
+                                int width, int height, int step,
+                                int pixels_per_thread) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_fma(x, y, width, height, step, in_buf, out_buf, seeds);
+    }
+}
+
+// Helper device function to process one pixel with Integer Math (No Coord Prop)
+__device__ inline void process_pixel_int_math(int x, int y, int width, int height, int step, 
+                                     const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                     const GPUSeed* __restrict__ seeds) 
+{
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = __ldg(&in_buf[idx]);
+    int best_dist = 2000000000; // Max int approx
+
+    if (best_seed_idx != -1) {
+        const int* seeds_ptr = (const int*)seeds;
+        int sx = __ldg(&seeds_ptr[best_seed_idx * 2]);
+        int sy = __ldg(&seeds_ptr[best_seed_idx * 2 + 1]);
+        int dx = x - sx;
+        int dy = y - sy;
+        best_dist = dx * dx + dy * dy;
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * width + nx;
+                int neighbor_seed_idx = __ldg(&in_buf[n_idx]);
+
+                if (neighbor_seed_idx != -1) {
+                    const int* seeds_ptr = (const int*)seeds;
+                    int sx = __ldg(&seeds_ptr[neighbor_seed_idx * 2]);
+                    int sy = __ldg(&seeds_ptr[neighbor_seed_idx * 2 + 1]);
+                    int dist_x = x - sx;
+                    int dist_y = y - sy;
+                    int dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                    if (dist_sq < best_dist) {
+                        best_dist = dist_sq;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
+// Helper device function to process one pixel with Manhattan Distance (No Coord Prop)
+__device__ inline void process_pixel_manhattan(int x, int y, int width, int height, int step, 
+                                     const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                     const GPUSeed* __restrict__ seeds) 
+{
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    
+    // Current best seed from previous step
+    int best_seed_idx = __ldg(&in_buf[idx]);
+    int best_dist = 2000000000;
+
+    if (best_seed_idx != -1) {
+        const int* seeds_ptr = (const int*)seeds;
+        int sx = __ldg(&seeds_ptr[best_seed_idx * 2]);
+        int sy = __ldg(&seeds_ptr[best_seed_idx * 2 + 1]);
+        // __sad(a, b, c) = |a - b| + c
+        best_dist = __sad(x, sx, __sad(y, sy, 0));
+    }
+
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+
+            int nx = x + dx * step;
+            int ny = y + dy * step;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = ny * width + nx;
+                int neighbor_seed_idx = __ldg(&in_buf[n_idx]);
+
+                if (neighbor_seed_idx != -1) {
+                    const int* seeds_ptr = (const int*)seeds;
+                    int sx = __ldg(&seeds_ptr[neighbor_seed_idx * 2]);
+                    int sy = __ldg(&seeds_ptr[neighbor_seed_idx * 2 + 1]);
+                    int dist = __sad(x, sx, __sad(y, sy, 0));
+
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best_seed_idx = neighbor_seed_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    out_buf[idx] = best_seed_idx;
+}
+
+__global__ void jfa_step_kernel_int_math_no_coord(const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                const GPUSeed* __restrict__ seeds, 
+                                int width, int height, int step,
+                                int pixels_per_thread) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_int_math(x, y, width, height, step, in_buf, out_buf, seeds);
+    }
+}
+
+__global__ void jfa_step_kernel_manhattan_no_coord(const int* __restrict__ in_buf, int* __restrict__ out_buf, 
+                                const GPUSeed* __restrict__ seeds, 
+                                int width, int height, int step,
+                                int pixels_per_thread) 
+{
+    int start_x = (blockIdx.x * blockDim.x + threadIdx.x) * pixels_per_thread;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    for (int i = 0; i < pixels_per_thread; ++i) {
+        int x = start_x + i;
+        process_pixel_manhattan(x, y, width, height, step, in_buf, out_buf, seeds);
+    }
+}
+
 // JFA Step Kernel with Pitch
 __global__ void jfa_step_kernel_pitch(const int* in_buf, int* out_buf, 
                                       const GPUSeed* seeds, 
@@ -821,7 +1423,17 @@ int jfa_gpu_cuda_impl(const Config& cfg,
             if (cfg.use_pitch) {
                 jfa_step_kernel_coord_pitch<<<dimGrid, dimBlock>>>(d_in_coord, d_out_coord, width, height, step, ppt, pitch_elms_coord);
             } else {
-                jfa_step_kernel_coord<<<dimGrid, dimBlock>>>(d_in_coord, d_out_coord, width, height, step, ppt);
+                if (cfg.use_ultimate) {
+                    jfa_step_kernel_ultimate<<<dimGrid, dimBlock>>>(d_in_coord, d_out_coord, width, height, step, ppt);
+                } else if (cfg.use_int_math) {
+                    jfa_step_kernel_int_math<<<dimGrid, dimBlock>>>(d_in_coord, d_out_coord, width, height, step, ppt);
+                } else if (cfg.use_manhattan) {
+                    jfa_step_kernel_manhattan<<<dimGrid, dimBlock>>>(d_in_coord, d_out_coord, width, height, step, ppt);
+                } else if (cfg.use_ldg) {
+                    jfa_step_kernel_coord_ldg<<<dimGrid, dimBlock>>>(d_in_coord, d_out_coord, width, height, step, ppt);
+                } else {
+                    jfa_step_kernel_coord<<<dimGrid, dimBlock>>>(d_in_coord, d_out_coord, width, height, step, ppt);
+                }
             }
         } else if (cfg.use_soa) {
             if (cfg.use_pitch) {
@@ -848,7 +1460,21 @@ int jfa_gpu_cuda_impl(const Config& cfg,
                 } else if (use_constant) {
                     jfa_step_kernel_constant<<<dimGrid, dimBlock>>>(d_in, d_out, width, height, step, ppt);
                 } else {
-                    jfa_step_kernel<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    if (cfg.use_ultimate) {
+                        jfa_step_kernel_ultimate_no_coord<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    } else if (cfg.use_int_math) {
+                        jfa_step_kernel_int_math_no_coord<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    } else if (cfg.use_manhattan) {
+                        jfa_step_kernel_manhattan_no_coord<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    } else if (cfg.use_restrict) {
+                        jfa_step_kernel_restrict<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    } else if (cfg.use_ldg) {
+                        jfa_step_kernel_ldg_no_coord<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    } else if (cfg.use_fma) {
+                        jfa_step_kernel_fma_no_coord<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    } else {
+                        jfa_step_kernel<<<dimGrid, dimBlock>>>(d_in, d_out, d_seeds, width, height, step, ppt);
+                    }
                 }
             }
         }

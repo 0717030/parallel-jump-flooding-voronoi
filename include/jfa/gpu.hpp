@@ -25,4 +25,7 @@ void jfa_gpu_cuda(const Config& cfg,
 int* allocate_pinned_memory(size_t count);
 void free_pinned_memory(int* ptr);
 
+// Helper to initialize CUDA context (warmup)
+void cuda_warmup();
+
 } // namespace jfa
