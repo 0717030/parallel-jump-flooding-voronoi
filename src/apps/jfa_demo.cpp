@@ -304,10 +304,17 @@ int main(int argc, char** argv)
     std::cout << "Config:\n"
               << "  backend   = " << opt.backend << "\n";
 
-    if (opt.backend == "omp" || opt.backend == "omp_simd") {
-        std::cout << "  threads   = " << opt.threads << "\n";
+    if (opt.backend == "serial") {
+        std::cout << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
+    } else if (opt.backend == "omp") {
+        std::cout << "  threads   = " << opt.threads << "\n"
+                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
     } else if (opt.backend == "simd") {
         std::cout << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
+                  << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
+    } else if (opt.backend == "omp_simd") {
+        std::cout << "  threads   = " << opt.threads << "\n"
+                  << "  use_soa   = " << (opt.use_soa ? "yes" : "no") << "\n"
                   << "  coord_prop= " << (opt.use_coord_prop ? "yes" : "no") << "\n";
     } else if (opt.backend == "cuda") {
         std::cout << "  block_dim = " << opt.block_dim_x << "x" << opt.block_dim_y << "\n"

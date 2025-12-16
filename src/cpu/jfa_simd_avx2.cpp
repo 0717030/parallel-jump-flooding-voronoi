@@ -13,6 +13,7 @@
 // - jfa_cpu_omp_simd(): OpenMP over rows + AVX2 inside row.
 
 #include <jfa/cpu.hpp>
+#include "cpu_affinity.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -31,19 +32,6 @@ namespace {
 
 constexpr int INVALID_COORD = -1;
 constexpr int DIST_INF = 0x3fffffff;
-
-inline bool cpu_has_avx2()
-{
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-    #if defined(__GNUC__) || defined(__clang__)
-        return __builtin_cpu_supports("avx2");
-    #else
-        return true; // best effort
-    #endif
-#else
-    return false;
-#endif
-}
 
 inline int sq_dist_i32(int x, int y, int sx, int sy)
 {
@@ -921,6 +909,164 @@ inline void coord_step_aos_avx2_omp_for(const Config& cfg,
 }
 
 // --------------------------
+// Packed Coordinate (16-bit) kernels
+// --------------------------
+// Layout: int32_t per pixel.
+// High 16 bits = Y, Low 16 bits = X.
+// -1 (0xFFFFFFFF) = Invalid.
+// Since MAX_DIM=32768, signed 16-bit (-32768..32767) or unsigned (0..65535) fits.
+// We treat them as signed 16-bit integers for subtraction, but coordinates are always positive.
+
+inline void packed_step_avx2(const Config& cfg,
+                             const int* in_buf,
+                             int* out_buf,
+                             int step)
+{
+    const int W = cfg.width;
+    const int H = cfg.height;
+    const __m256i inc = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    const __m256i neg1 = _mm256_set1_epi32(-1);
+    const __m256i inf = _mm256_set1_epi32(DIST_INF);
+    const __m256i mask_lo = _mm256_set1_epi32(0xFFFF);
+
+    auto scalar_pixel = [&](int x, int y) {
+        const int idx = y * W + x;
+        int best_packed = in_buf[idx];
+        
+        int best_d = DIST_INF;
+        if (best_packed != -1) {
+            int sx = best_packed & 0xFFFF;
+            int sy = (best_packed >> 16) & 0xFFFF;
+            int dx = sx - x;
+            int dy = sy - y;
+            best_d = dx * dx + dy * dy;
+        }
+
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int nx = x + dx * step;
+                const int ny = y + dy * step;
+                if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+                
+                int cand = in_buf[ny * W + nx];
+                if (cand == -1) continue;
+                
+                int csx = cand & 0xFFFF;
+                int csy = (cand >> 16) & 0xFFFF;
+                int cdx = csx - x;
+                int cdy = csy - y;
+                int d = cdx * cdx + cdy * cdy;
+                
+                if (d < best_d) {
+                    best_d = d;
+                    best_packed = cand;
+                }
+            }
+        }
+        out_buf[idx] = best_packed;
+    };
+
+    auto vector_pixel_fast = [&](int x, int x_end, int y) {
+        const int row = y * W;
+        const __m256i yv = _mm256_set1_epi32(y);
+
+        for (; x <= x_end; x += 8) {
+            const int idx0 = row + x;
+            const __m256i xv = _mm256_add_epi32(_mm256_set1_epi32(x), inc);
+
+            // Initialize best with center pixel (we will re-check it in loop or just init here)
+            __m256i best_packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in_buf + idx0));
+            __m256i best_invalid = _mm256_cmpeq_epi32(best_packed, neg1);
+            __m256i best_d;
+            
+            if (_mm256_movemask_epi8(best_invalid) == -1) {
+                best_d = inf;
+            } else {
+                __m256i sx = _mm256_and_si256(best_packed, mask_lo);
+                __m256i sy = _mm256_srli_epi32(best_packed, 16);
+                __m256i dx = _mm256_sub_epi32(sx, xv);
+                __m256i dy = _mm256_sub_epi32(sy, yv);
+                best_d = _mm256_add_epi32(_mm256_mullo_epi32(dx, dx), _mm256_mullo_epi32(dy, dy));
+                best_d = _mm256_blendv_epi8(best_d, inf, best_invalid);
+            }
+
+            auto check_row = [&](int base_offset, __m256i& row_d, __m256i& row_packed) __attribute__((always_inline)) {
+                // Load 3 neighbors
+                __m256i p0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in_buf + base_offset - step));
+                __m256i p1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in_buf + base_offset));
+                __m256i p2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in_buf + base_offset + step));
+
+                auto calc_d = [&](__m256i p) {
+                    __m256i inv = _mm256_cmpeq_epi32(p, neg1);
+                    __m256i d = inf;
+                    if (_mm256_movemask_epi8(inv) != -1) {
+                         __m256i sx = _mm256_and_si256(p, mask_lo);
+                         __m256i sy = _mm256_srli_epi32(p, 16);
+                         __m256i d_dx = _mm256_sub_epi32(sx, xv);
+                         __m256i d_dy = _mm256_sub_epi32(sy, yv);
+                         d = _mm256_add_epi32(_mm256_mullo_epi32(d_dx, d_dx), _mm256_mullo_epi32(d_dy, d_dy));
+                         d = _mm256_blendv_epi8(d, inf, inv);
+                    }
+                    return d;
+                };
+
+                __m256i d0 = calc_d(p0);
+                __m256i d1 = calc_d(p1);
+                __m256i d2 = calc_d(p2);
+
+                // Reduce 3 -> 1
+                __m256i cmp1 = _mm256_cmpgt_epi32(d0, d1); // d0 > d1 => d1 better
+                row_d = _mm256_blendv_epi8(d0, d1, cmp1);
+                row_packed = _mm256_blendv_epi8(p0, p1, cmp1);
+
+                __m256i cmp2 = _mm256_cmpgt_epi32(row_d, d2);
+                row_d = _mm256_blendv_epi8(row_d, d2, cmp2);
+                row_packed = _mm256_blendv_epi8(row_packed, p2, cmp2);
+            };
+
+            const int base = y * W + x;
+            __m256i d_top, p_top;
+            __m256i d_mid, p_mid;
+            __m256i d_bot, p_bot;
+
+            check_row(base - step * W, d_top, p_top);
+            check_row(base,            d_mid, p_mid);
+            check_row(base + step * W, d_bot, p_bot);
+
+            // Reduce rows to best
+            __m256i cmp_tm = _mm256_cmpgt_epi32(d_top, d_mid);
+            __m256i best_row_d = _mm256_blendv_epi8(d_top, d_mid, cmp_tm);
+            __m256i best_row_p = _mm256_blendv_epi8(p_top, p_mid, cmp_tm);
+
+            __m256i cmp_b = _mm256_cmpgt_epi32(best_row_d, d_bot);
+            best_row_d = _mm256_blendv_epi8(best_row_d, d_bot, cmp_b);
+            best_row_p = _mm256_blendv_epi8(best_row_p, p_bot, cmp_b);
+            
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_buf + idx0), best_row_p);
+        }
+    };
+
+    for (int y = 0; y < H; ++y) {
+        const bool y_interior = (y >= step) && (y < H - step);
+        if (!y_interior || W < 8 || step <= 0) {
+            for (int x = 0; x < W; ++x) scalar_pixel(x, y);
+            continue;
+        }
+
+        for (int x = 0; x < step; ++x) scalar_pixel(x, y);
+
+        int x = step;
+        int x_vec_end = (W - step) - 8;
+        
+        if (x <= x_vec_end) {
+             vector_pixel_fast(x, x_vec_end, y);
+        }
+        
+        for (; x < W; ++x) scalar_pixel(x, y);
+    }
+}
+
+// --------------------------
 // AVX2 index-based kernels
 // --------------------------
 
@@ -963,22 +1109,12 @@ inline void idx_step_avx2(const Config& cfg,
         out_buf[idx] = best_seed;
     };
 
-    for (int y = 0; y < H; ++y) {
-        const bool y_interior = (y >= step) && (y < H - step);
+    auto vector_pixel_safe = [&](int& x, int x_end, int y) {
         const int row = y * W;
-
-        if (!y_interior || W < 8 || step <= 0) {
-            for (int x = 0; x < W; ++x) scalar_pixel(x, y);
-            continue;
-        }
-
-        for (int x = 0; x < step; ++x) scalar_pixel(x, y);
-
-        int x = step;
-        const int x_vec_end = (W - step) - 8;
         const __m256i yv = _mm256_set1_epi32(y);
+        const __m256i W_vec = _mm256_set1_epi32(W);
 
-        for (; x <= x_vec_end; x += 8) {
+        for (; x <= x_end; x += 8) {
             const int idx0 = row + x;
             const __m256i xv = _mm256_add_epi32(_mm256_set1_epi32(x), inc);
 
@@ -986,7 +1122,6 @@ inline void idx_step_avx2(const Config& cfg,
             __m256i best_invalid = _mm256_cmpeq_epi32(best_idx, neg1);
             __m256i best_d;
             if (_mm256_movemask_epi8(best_invalid) == -1) {
-                // All lanes invalid: skip gather entirely.
                 best_d = inf;
             } else {
                 __m256i best_sx, best_sy;
@@ -994,7 +1129,60 @@ inline void idx_step_avx2(const Config& cfg,
                 best_d = dist_sq_vec_seed(xv, yv, best_sx, best_sy, best_invalid);
             }
 
-            // dy=-1: dx=-1,0,1
+            for (int dy = -1; dy <= 1; ++dy) {
+                int ny_s = y + dy * step;
+                __m256i mask_y = (ny_s >= 0 && ny_s < H) ? _mm256_set1_epi32(-1) : _mm256_setzero_si256();
+                if (_mm256_movemask_epi8(mask_y) == 0) continue;
+
+                const int base = ny_s * W;
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dy == 0 && dx == 0) continue;
+
+                    __m256i nx = _mm256_add_epi32(xv, _mm256_set1_epi32(dx * step));
+                    __m256i mask_x = _mm256_and_si256(_mm256_cmpgt_epi32(nx, neg1), _mm256_cmpgt_epi32(W_vec, nx));
+                    __m256i mask = _mm256_and_si256(mask_x, mask_y);
+
+                    if (_mm256_movemask_epi8(mask) == 0) continue;
+
+                    const int offset = base + x + dx * step;
+                    const int* addr = in_buf.data() + offset;
+                    
+                    __m256i cand_idx = _mm256_maskload_epi32(addr, mask);
+                    cand_idx = _mm256_blendv_epi8(neg1, cand_idx, mask);
+
+                    __m256i inv = _mm256_cmpeq_epi32(cand_idx, neg1);
+                    if (_mm256_movemask_epi8(inv) != -1) {
+                        __m256i csx, csy;
+                        gather.gather_xy_known_mask(cand_idx, inv, csx, csy);
+                        __m256i cd = dist_sq_vec_seed(xv, yv, csx, csy, inv);
+                        update_best_idx(best_d, best_idx, cd, cand_idx);
+                    }
+                }
+            }
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_buf.data() + idx0), best_idx);
+        }
+    };
+
+    auto vector_pixel_fast = [&](int& x, int x_end, int y) {
+        const int row = y * W;
+        const __m256i yv = _mm256_set1_epi32(y);
+
+        for (; x <= x_end; x += 8) {
+            const int idx0 = row + x;
+            const __m256i xv = _mm256_add_epi32(_mm256_set1_epi32(x), inc);
+
+            __m256i best_idx = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in_buf.data() + idx0));
+            __m256i best_invalid = _mm256_cmpeq_epi32(best_idx, neg1);
+            __m256i best_d;
+            if (_mm256_movemask_epi8(best_invalid) == -1) {
+                best_d = inf;
+            } else {
+                __m256i best_sx, best_sy;
+                gather.gather_xy_known_mask(best_idx, best_invalid, best_sx, best_sy);
+                best_d = dist_sq_vec_seed(xv, yv, best_sx, best_sy, best_invalid);
+            }
+
+            // dy=-1
             {
                 const int base = (y - step) * W;
                 for (int dx = -1; dx <= 1; ++dx) {
@@ -1009,8 +1197,7 @@ inline void idx_step_avx2(const Config& cfg,
                     }
                 }
             }
-
-            // dy=0: dx=-1,+1 (skip center)
+            // dy=0
             {
                 const int base = y * W;
                 for (int dx : {-1, 1}) {
@@ -1025,8 +1212,7 @@ inline void idx_step_avx2(const Config& cfg,
                     }
                 }
             }
-
-            // dy=+1: dx=-1,0,1
+            // dy=+1
             {
                 const int base = (y + step) * W;
                 for (int dx = -1; dx <= 1; ++dx) {
@@ -1041,12 +1227,36 @@ inline void idx_step_avx2(const Config& cfg,
                     }
                 }
             }
-
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_buf.data() + idx0), best_idx);
         }
+    };
 
-        for (; x < W - step; ++x) scalar_pixel(x, y);
-        for (int xb = W - step; xb < W; ++xb) scalar_pixel(xb, y);
+    for (int y = 0; y < H; ++y) {
+        int x = 0;
+        bool y_safe = (y >= step && y < H - step);
+        int safe_x_end = (W - step) - 8;
+        
+        // 1. Left / Generic Unsafe
+        int end_left = std::min(W - 8, step);
+        if (end_left >= x) {
+             vector_pixel_safe(x, end_left, y);
+        }
+        
+        // 2. Center Safe
+        if (y_safe) {
+             if (safe_x_end >= x) {
+                 vector_pixel_fast(x, safe_x_end, y);
+             }
+        }
+        
+        // 3. Right Unsafe
+        int end_right = W - 8;
+        if (end_right >= x) {
+             vector_pixel_safe(x, end_right, y);
+        }
+        
+        // 4. Tail Scalar
+        for (; x < W; ++x) scalar_pixel(x, y);
     }
 }
 
@@ -1231,11 +1441,100 @@ void jfa_cpu_simd(const Config& cfg,
                   SeedIndexBuffer& out_buffer,
                   PassCallback pass_cb)
 {
-    // Mode selection:
+        // Mode selection:
     // - cfg.use_coord_prop == false (default): index-based JFA (per-pixel seed index)
     // - cfg.use_coord_prop == true           : coordinate propagation (per-pixel seed coordinates)
-    //
-    // This matches CLI semantics: user opts into coord-prop via --use-coord-prop.
+    
+    // Auto-detect if we can use Packed Coordinate Optimization (16-bit).
+    // EXPERIMENTAL: Disabled because it turned out to be slower than Index-based gather 
+    // (L1 cache gather is faster than unpack/blend overhead).
+    bool use_packed = false; 
+    /* !cfg.use_coord_prop && !cfg.use_soa &&
+                      (cfg.width < 32768 && cfg.height < 32768); */
+
+    if (use_packed) {
+        // Packed Coordinate Path
+        const int W = cfg.width;
+        const int H = cfg.height;
+        const int N = W * H;
+
+        // Buffers store packed coordinates: (y << 16) | x
+        // Init to -1
+        std::vector<int> bufA(N, -1);
+        std::vector<int> bufB(N, -1);
+
+        // Init seeds
+        for (const auto& s : seeds) {
+            if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
+            // Pack: y in high 16, x in low 16
+            // Note: s.x, s.y are known to be < 32768
+            bufA[s.y * W + s.x] = (s.y << 16) | (s.x & 0xFFFF);
+        }
+
+        int max_dim = std::max(W, H);
+        int step = max_dim / 2;
+        if (step <= 0) step = 1;
+
+        bool fromA = true;
+        int pass_idx = 0;
+
+        // Build id_map for final conversion (Packed Coord -> Seed Index)
+        std::vector<int> id_map(N, -1);
+        for (int i = 0; i < static_cast<int>(seeds.size()); ++i) {
+            const auto& s = seeds[i];
+            if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
+            id_map[s.y * W + s.x] = i;
+        }
+        
+        // Helper to dump frames if needed (must convert packed -> index)
+        auto convert_and_callback = [&](int s, const std::vector<int>& buf) {
+            if (!pass_cb) return;
+            SeedIndexBuffer tmp(N);
+            for(int i=0; i<N; ++i) {
+                int val = buf[i];
+                if (val == -1) tmp[i] = -1;
+                else {
+                    int sx = val & 0xFFFF;
+                    int sy = (val >> 16) & 0xFFFF;
+                    int sidx = sy * W + sx;
+                    tmp[i] = (sidx >= 0 && sidx < N) ? id_map[sidx] : -1;
+                }
+            }
+            pass_cb(pass_idx, s, tmp);
+        };
+
+        while (step >= 1) {
+            const int* in = fromA ? bufA.data() : bufB.data();
+            int* out = fromA ? bufB.data() : bufA.data();
+
+            packed_step_avx2(cfg, in, out, step);
+
+            if (pass_cb) {
+                const auto& cur = fromA ? bufB : bufA;
+                convert_and_callback(step, cur);
+            }
+
+            fromA = !fromA;
+            step /= 2;
+            ++pass_idx;
+        }
+
+        const auto& final_buf = fromA ? bufA : bufB;
+        // Convert final packed coords to indices
+        out_buffer.resize(N);
+        for(int i=0; i<N; ++i) {
+            int val = final_buf[i];
+            if (val == -1) out_buffer[i] = -1;
+            else {
+                int sx = val & 0xFFFF;
+                int sy = (val >> 16) & 0xFFFF;
+                int sidx = sy * W + sx;
+                out_buffer[i] = (sidx >= 0 && sidx < N) ? id_map[sidx] : -1;
+            }
+        }
+        return;
+    }
+
     if (!cfg.use_coord_prop) {
         const int W = cfg.width;
         const int H = cfg.height;
@@ -1274,7 +1573,6 @@ void jfa_cpu_simd(const Config& cfg,
         int step = max_dim / 2;
         if (step <= 0) step = 1;
 
-        const bool has_avx2 = cpu_has_avx2();
         bool fromA = true;
         int pass_idx = 0;
 
@@ -1282,11 +1580,7 @@ void jfa_cpu_simd(const Config& cfg,
             const SeedIndexBuffer& in = fromA ? bufA : bufB;
             SeedIndexBuffer& out = fromA ? bufB : bufA;
 
-            if (has_avx2) {
-                idx_step_avx2(cfg, seeds, gather, in, out, step);
-            } else {
-                idx_step_scalar(cfg, seeds, in, out, step);
-            }
+            idx_step_avx2(cfg, seeds, gather, in, out, step);
 
             if (pass_cb) {
                 pass_cb(pass_idx, step, out);
@@ -1344,11 +1638,7 @@ void jfa_cpu_simd(const Config& cfg,
             int* sx_out = fromA ? sxB.data() : sxA.data();
             int* sy_out = fromA ? syB.data() : syA.data();
 
-            if (cpu_has_avx2()) {
-                coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
-            } else {
-                coord_step_scalar_soa(cfg, sx_in, sy_in, sx_out, sy_out, step);
-            }
+            coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
 
             if (pass_cb) {
                 const auto& sx_cur = fromA ? sxB : sxA;
@@ -1386,11 +1676,7 @@ void jfa_cpu_simd(const Config& cfg,
         const int* in = fromA ? xyA.data() : xyB.data();
         int* out = fromA ? xyB.data() : xyA.data();
 
-        if (cpu_has_avx2()) {
-            coord_step_aos_avx2<false>(cfg, in, out, step);
-        } else {
-            coord_step_scalar_aos(cfg, in, out, step);
-        }
+        coord_step_aos_avx2<false>(cfg, in, out, step);
 
         if (pass_cb) {
             const auto& cur = fromA ? xyB : xyA;
@@ -1464,8 +1750,6 @@ void jfa_cpu_omp_simd(const Config& cfg,
             gather.seeds_xy = reinterpret_cast<const int*>(seeds.data());
         }
 
-        const bool has_avx2 = cpu_has_avx2();
-
 #if defined(_OPENMP)
         #pragma omp parallel
         {
@@ -1475,37 +1759,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
                 const SeedIndexBuffer& in = fromA ? bufA : bufB;
                 SeedIndexBuffer& out = fromA ? bufB : bufA;
 
-                if (has_avx2) {
-                    idx_step_avx2_omp_for(cfg, seeds, gather, in, out, step);
-                } else {
-                    // Scalar fallback still parallel over rows.
-                    #pragma omp for schedule(static)
-                    for (int y = 0; y < H; ++y) {
-                        for (int x = 0; x < W; ++x) {
-                            const int idx = y * W + x;
-                            int best_seed = in[idx];
-                            int best_d = sq_dist_seed_scalar(x, y, best_seed, seeds);
-
-                            for (int dy = -1; dy <= 1; ++dy) {
-                                for (int dx = -1; dx <= 1; ++dx) {
-                                    const int nx = x + dx * step;
-                                    const int ny = y + dy * step;
-                                    if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-                                    const int nidx = ny * W + nx;
-                                    const int cand_seed = in[nidx];
-                                    if (cand_seed < 0) continue;
-                                    const int d = sq_dist_seed_scalar(x, y, cand_seed, seeds);
-                                    if (d < best_d) {
-                                        best_d = d;
-                                        best_seed = cand_seed;
-                                    }
-                                }
-                            }
-
-                            out[idx] = best_seed;
-                        }
-                    }
-                }
+                idx_step_avx2_omp_for(cfg, seeds, gather, in, out, step);
 
                 #pragma omp single
                 {
@@ -1549,8 +1803,6 @@ void jfa_cpu_omp_simd(const Config& cfg,
         }
     }
 
-    const bool has_avx2 = cpu_has_avx2();
-
     if (use_soa) {
         std::vector<int> sxA(N, INVALID_COORD), syA(N, INVALID_COORD);
         std::vector<int> sxB(N, INVALID_COORD), syB(N, INVALID_COORD);
@@ -1576,40 +1828,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
                 int* sx_out = fromA ? sxB.data() : sxA.data();
                 int* sy_out = fromA ? syB.data() : syA.data();
 
-                if (has_avx2) {
-                    coord_step_soa_avx2_omp_for(cfg, sx_in, sy_in, sx_out, sy_out, step);
-                } else {
-                    // Scalar fallback still parallel over rows.
-                    #pragma omp for schedule(static)
-                    for (int y = 0; y < H; ++y) {
-                        for (int x = 0; x < W; ++x) {
-                            const int idx = y * W + x;
-                            int best_sx = sx_in[idx];
-                            int best_sy = sy_in[idx];
-                            int best_d  = sq_dist_i32(x, y, best_sx, best_sy);
-
-                            for (int dy = -1; dy <= 1; ++dy) {
-                                for (int dx = -1; dx <= 1; ++dx) {
-                                    const int nx = x + dx * step;
-                                    const int ny = y + dy * step;
-                                    if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-                                    const int nidx = ny * W + nx;
-                                    const int csx = sx_in[nidx];
-                                    if (csx == INVALID_COORD) continue;
-                                    const int csy = sy_in[nidx];
-                                    const int d = sq_dist_i32(x, y, csx, csy);
-                                    if (d < best_d) {
-                                        best_d = d;
-                                        best_sx = csx;
-                                        best_sy = csy;
-                                    }
-                                }
-                            }
-                            sx_out[idx] = best_sx;
-                            sy_out[idx] = best_sy;
-                        }
-                    }
-                }
+                coord_step_soa_avx2_omp_for(cfg, sx_in, sy_in, sx_out, sy_out, step);
 
                 #pragma omp single
                 {
@@ -1632,8 +1851,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
             const int* sy_in = fromA ? syA.data() : syB.data();
             int* sx_out = fromA ? sxB.data() : sxA.data();
             int* sy_out = fromA ? syB.data() : syA.data();
-            if (has_avx2) coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
-            else coord_step_scalar_soa(cfg, sx_in, sy_in, sx_out, sy_out, step);
+            coord_step_soa_avx2<false>(cfg, sx_in, sy_in, sx_out, sy_out, step);
             if (pass_cb) {
                 const auto& sx_cur = fromA ? sxB : sxA;
                 const auto& sy_cur = fromA ? syB : syA;
@@ -1672,42 +1890,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
             const int* in = fromA ? xyA.data() : xyB.data();
             int* out = fromA ? xyB.data() : xyA.data();
 
-            if (has_avx2) {
-                coord_step_aos_avx2_omp_for(cfg, in, out, step);
-            } else {
-                #pragma omp for schedule(static)
-                for (int y = 0; y < H; ++y) {
-                    for (int x = 0; x < W; ++x) {
-                        const int idx = y * W + x;
-                        const int base = 2 * idx;
-                        int best_sx = in[base + 0];
-                        int best_sy = in[base + 1];
-                        int best_d  = sq_dist_i32(x, y, best_sx, best_sy);
-
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                const int nx = x + dx * step;
-                                const int ny = y + dy * step;
-                                if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-                                const int nidx = ny * W + nx;
-                                const int nbase = 2 * nidx;
-                                const int csx = in[nbase + 0];
-                                if (csx == INVALID_COORD) continue;
-                                const int csy = in[nbase + 1];
-                                const int d = sq_dist_i32(x, y, csx, csy);
-                                if (d < best_d) {
-                                    best_d = d;
-                                    best_sx = csx;
-                                    best_sy = csy;
-                                }
-                            }
-                        }
-
-                        out[base + 0] = best_sx;
-                        out[base + 1] = best_sy;
-                    }
-                }
-            }
+            coord_step_aos_avx2_omp_for(cfg, in, out, step);
 
             #pragma omp single
             {
@@ -1726,8 +1909,7 @@ void jfa_cpu_omp_simd(const Config& cfg,
         const bool fromA = (pass_idx % 2 == 0);
         const int* in = fromA ? xyA.data() : xyB.data();
         int* out = fromA ? xyB.data() : xyA.data();
-        if (has_avx2) coord_step_aos_avx2<false>(cfg, in, out, step);
-        else coord_step_scalar_aos(cfg, in, out, step);
+        coord_step_aos_avx2<false>(cfg, in, out, step);
         if (pass_cb) {
             const auto& cur = fromA ? xyB : xyA;
             coordbuf_to_seed_indices_aos(cfg, cur, id_map, tmp_indices);
