@@ -37,9 +37,12 @@ struct Options {
     bool use_pinned = false;         // NEW: Use pinned memory
     bool use_soa = false;            // NEW: Use Structure of Arrays
     bool use_coord_prop = false;     // NEW: Use Coordinate Propagation
+    bool use_coord_prop_set = false; // NEW: user explicitly gave --use-coord-prop
     bool cpu_use_pitch = false;      // NEW: CPU SIMD: pad internal row stride (pitch)
     std::string cpu_seeds_layout = "packed";   // CPU SIMD only (index-based): packed|soa|aos
+    bool cpu_seeds_layout_set = false;         // NEW: user explicitly gave --cpu-seeds-layout
     std::string cpu_coordbuf_layout = "soa";   // CPU SIMD only (coord-prop): soa|aos|packed
+    bool cpu_coordbuf_layout_set = false;      // NEW: user explicitly gave --cpu-coordbuf-layout
     bool skip_exact = false;         // NEW: Skip exact check
     bool skip_serial = false;        // NEW: Skip serial check
 };
@@ -56,10 +59,10 @@ void print_usage(const char* prog) {
               << "  --use-pitch              Use cudaMallocPitch for memory alignment (default: off)\n"
               << "  --pinned                 Use cudaMallocHost for pinned memory (default: off)\n"
               << "  --soa                    Use Structure of Arrays (CUDA only: seeds layout) (default: off)\n"
-              << "  --use-coord-prop         Use Coordinate Propagation (CPU and CUDA) (default: off)\n"
+              << "  --use-coord-prop         Use Coordinate Propagation (CPU and CUDA) (default: off; simd/omp_simd default: on)\n"
               << "  --cpu-pitch              CPU SIMD only: pad internal row stride to align vector loads/stores (default: off)\n"
               << "  --cpu-seeds-layout {packed|soa|aos}  CPU SIMD only (index-based mode): choose seeds gather layout (default: packed)\n"
-              << "  --cpu-coordbuf-layout {soa|aos|packed} CPU SIMD only (coord-prop mode): choose pixel coord buffer layout (default: soa)\n"
+              << "  --cpu-coordbuf-layout {soa|aos|packed} CPU SIMD only (coord-prop mode): choose pixel coord buffer layout (default: packed for simd/omp_simd)\n"
               << "  --use-shared             Use shared memory for seeds (CUDA only)\n"
               << "  --use-constant           Use constant memory for seeds (CUDA only)\n"
               << "  --width W                Image width  (default: 512)\n"
@@ -159,6 +162,7 @@ Options parse_args(int argc, char** argv) {
             opt.use_soa = true;
         } else if (arg == "--use-coord-prop") {
             opt.use_coord_prop = true;
+            opt.use_coord_prop_set = true;
         } else if (arg == "--cpu-pitch") {
             opt.cpu_use_pitch = true;
         } else if (arg.rfind("--cpu-seeds-layout", 0) == 0) {
@@ -168,6 +172,7 @@ Options parse_args(int argc, char** argv) {
                 std::exit(1);
             }
             opt.cpu_seeds_layout = v;
+            opt.cpu_seeds_layout_set = true;
         } else if (arg.rfind("--cpu-coordbuf-layout", 0) == 0) {
             std::string v;
             if (!get_value(v)) {
@@ -175,6 +180,7 @@ Options parse_args(int argc, char** argv) {
                 std::exit(1);
             }
             opt.cpu_coordbuf_layout = v;
+            opt.cpu_coordbuf_layout_set = true;
         } else if (arg == "--skip-check") {
             opt.skip_exact = true;
             opt.skip_serial = true;
@@ -250,6 +256,28 @@ int main(int argc, char** argv)
     using Clock = std::chrono::high_resolution_clock;
 
     Options opt = parse_args(argc, argv);
+
+    // Backend-specific defaults:
+    // For SIMD backends, the fastest configuration in our benchmarks is coordinate-propagation
+    // with packed per-pixel coord buffer.
+    if ((opt.backend == "simd" || opt.backend == "omp_simd")) {
+        // If user explicitly selects a coordbuf layout, assume they intend coord-prop.
+        if (!opt.use_coord_prop_set && opt.cpu_coordbuf_layout_set) {
+            opt.use_coord_prop = true;
+        }
+        // If user explicitly selects a seeds layout (index-based tuning), assume index-based unless they also set coord-prop.
+        if (!opt.use_coord_prop_set && opt.cpu_seeds_layout_set && !opt.cpu_coordbuf_layout_set) {
+            opt.use_coord_prop = false;
+        }
+        // Otherwise, default to the fastest mode.
+        if (!opt.use_coord_prop_set && !opt.cpu_seeds_layout_set && !opt.cpu_coordbuf_layout_set) {
+            opt.use_coord_prop = true;
+        }
+        // If we ended up in coord-prop mode and user didn't choose a coordbuf layout, pick the fastest layout.
+        if (opt.use_coord_prop && !opt.cpu_coordbuf_layout_set) {
+            opt.cpu_coordbuf_layout = "packed";
+        }
+    }
 
     // 決定實際 output 目錄
     std::string auto_name;
@@ -437,19 +465,21 @@ int main(int argc, char** argv)
     };
 
     if (opt.backend == "serial") {
-        // backend=serial 時，再跑一次 serial JFA + callback（給動畫）
-        jfa::SeedIndexBuffer tmp_buf;
-        auto cb = make_callback("cpu_jfa_serial");
-        auto t0 = Clock::now();
-        jfa::jfa_cpu_serial(cfg, seeds, tmp_buf, cb);
-        auto t1 = Clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        // backend=serial 時：只有在需要 dump frames 時才再跑一次 serial + callback（給動畫）。
+        if (opt.dump_frames) {
+            jfa::SeedIndexBuffer tmp_buf;
+            auto cb = make_callback("cpu_jfa_serial");
+            auto t0 = Clock::now();
+            jfa::jfa_cpu_serial(cfg, seeds, tmp_buf, cb);
+            auto t1 = Clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-        int diff_exact_tmp = diff_count(exact_buf, tmp_buf);
-        std::cout << "[Serial JFA (with dump)] time = " << ms << " ms"
-                  << ", diff vs exact = " << diff_exact_tmp << " pixels\n";
+            int diff_exact_tmp = diff_count(exact_buf, tmp_buf);
+            std::cout << "[Serial JFA (with dump)] time = " << ms << " ms"
+                      << ", diff vs exact = " << diff_exact_tmp << " pixels\n";
+        }
 
-        // NEW: 對 CSV 來說，serial backend 的「parallel」結果就是 serial baseline
+        // 對 CSV 來說，serial backend 的「parallel」結果就是 serial baseline
         parallel_ms = serial_ms;
         diff_exact_parallel = diff_exact_serial;
         diff_serial_parallel = 0;

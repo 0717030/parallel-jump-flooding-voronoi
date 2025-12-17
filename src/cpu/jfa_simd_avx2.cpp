@@ -35,7 +35,7 @@ constexpr int DIST_INF = 0x3fffffff;
 // - 1: use int16(dx,dy) packing + _mm256_madd_epi16 (vpmaddwd)
 // - 0: use 32-bit mul+mul+add
 #ifndef JFA_AVX2_USE_MADD
-#define JFA_AVX2_USE_MADD 0
+#define JFA_AVX2_USE_MADD 1
 #endif
 
 inline int sq_dist_i32(int x, int y, int sx, int sy)
@@ -128,21 +128,35 @@ inline __m256i pack_dxdy_i16_pairs(__m256i dx32, __m256i dy32)
     return _mm256_set_m128i(hi, lo);
 }
 
+inline __m256i dist_sq_vec_packed_xy(__m256i pix_xy_packed, __m256i seed_xy_packed, __m256i invalid_mask)
+{
+    // Both pix_xy_packed and seed_xy_packed are 8x int32:
+    //   packed = (y << 16) | (x & 0xFFFF)
+    // Interpreting as 16-bit lanes gives [x0,y0,x1,y1,...], so we can use epi16 math directly.
+    const __m256i inf = _mm256_set1_epi32(DIST_INF);
+    __m256i dxy16 = _mm256_sub_epi16(seed_xy_packed, pix_xy_packed);
+    __m256i d = _mm256_madd_epi16(dxy16, dxy16); // dx^2 + dy^2 per pixel lane
+    return _mm256_blendv_epi8(d, inf, invalid_mask);
+}
+
 inline __m256i dist_sq_vec_seed(__m256i xv, __m256i yv, __m256i sx, __m256i sy, __m256i invalid_mask)
 {
+#if JFA_AVX2_USE_MADD
+    // Scheme B: pack (sx,sy) and (x,y) into 16-bit halves, do epi16 subtract, then madd.
+    // This avoids the pack+shuffle overhead in pack_dxdy_i16_pairs.
+    const __m256i mask_lo = _mm256_set1_epi32(0xFFFF);
+    __m256i pix_xy = _mm256_or_si256(_mm256_slli_epi32(yv, 16), _mm256_and_si256(xv, mask_lo));
+    __m256i seed_xy = _mm256_or_si256(_mm256_slli_epi32(sy, 16), _mm256_and_si256(sx, mask_lo));
+    return dist_sq_vec_packed_xy(pix_xy, seed_xy, invalid_mask);
+#else
     const __m256i inf  = _mm256_set1_epi32(DIST_INF);
     __m256i dx32 = _mm256_sub_epi32(sx, xv);
     __m256i dy32 = _mm256_sub_epi32(sy, yv);
-#if JFA_AVX2_USE_MADD
-    // int16(dx,dy) + madd_epi16 => dx^2 + dy^2
-    __m256i v16 = pack_dxdy_i16_pairs(dx32, dy32);
-    __m256i d = _mm256_madd_epi16(v16, v16);
-#else
     __m256i dx2 = _mm256_mullo_epi32(dx32, dx32);
     __m256i dy2 = _mm256_mullo_epi32(dy32, dy32);
     __m256i d = _mm256_add_epi32(dx2, dy2);
-#endif
     return _mm256_blendv_epi8(d, inf, invalid_mask);
+#endif
 }
 
 inline void update_best_idx(__m256i& best_d, __m256i& best_idx, __m256i cand_d, __m256i cand_idx)
@@ -287,18 +301,20 @@ inline __m256i dist_sq_vec(__m256i x, __m256i y, __m256i sx, __m256i sy)
     const __m256i inf  = _mm256_set1_epi32(DIST_INF);
 
     __m256i invalid_mask = _mm256_cmpeq_epi32(sx, neg1);
+#if JFA_AVX2_USE_MADD
+    const __m256i mask_lo = _mm256_set1_epi32(0xFFFF);
+    __m256i pix_xy = _mm256_or_si256(_mm256_slli_epi32(y, 16), _mm256_and_si256(x, mask_lo));
+    __m256i seed_xy = _mm256_or_si256(_mm256_slli_epi32(sy, 16), _mm256_and_si256(sx, mask_lo));
+    return dist_sq_vec_packed_xy(pix_xy, seed_xy, invalid_mask);
+#else
     __m256i dx32 = _mm256_sub_epi32(sx, x);
     __m256i dy32 = _mm256_sub_epi32(sy, y);
-#if JFA_AVX2_USE_MADD
-    __m256i v16 = pack_dxdy_i16_pairs(dx32, dy32);
-    __m256i d = _mm256_madd_epi16(v16, v16);
-#else
     __m256i dx2 = _mm256_mullo_epi32(dx32, dx32);
     __m256i dy2 = _mm256_mullo_epi32(dy32, dy32);
     __m256i d = _mm256_add_epi32(dx2, dy2);
-#endif
     d = _mm256_blendv_epi8(d, inf, invalid_mask);
     return d;
+#endif
 }
 
 inline void update_best(__m256i& best_d,
@@ -1005,19 +1021,19 @@ inline void packed_step_avx2(const Config& cfg,
 
             auto dist_packed = [&](__m256i p) __attribute__((always_inline)) {
                 __m256i inv = _mm256_cmpeq_epi32(p, neg1);
+                const __m256i pix_xy = _mm256_or_si256(_mm256_slli_epi32(yv, 16), _mm256_and_si256(xv, mask_lo));
+#if JFA_AVX2_USE_MADD
+                return dist_sq_vec_packed_xy(pix_xy, p, inv);
+#else
                 __m256i sx = _mm256_and_si256(p, mask_lo);
                 __m256i sy = _mm256_srli_epi32(p, 16);
                 __m256i dx32 = _mm256_sub_epi32(sx, xv);
                 __m256i dy32 = _mm256_sub_epi32(sy, yv);
-#if JFA_AVX2_USE_MADD
-                __m256i v16 = pack_dxdy_i16_pairs(dx32, dy32);
-                __m256i d = _mm256_madd_epi16(v16, v16);
-#else
                 __m256i dx2 = _mm256_mullo_epi32(dx32, dx32);
                 __m256i dy2 = _mm256_mullo_epi32(dy32, dy32);
                 __m256i d = _mm256_add_epi32(dx2, dy2);
-#endif
                 return _mm256_blendv_epi8(d, inf, inv);
+#endif
             };
 
             auto check_row = [&](int base_offset, __m256i& row_d, __m256i& row_packed) __attribute__((always_inline)) {
@@ -1141,19 +1157,19 @@ inline void packed_step_avx2_omp_for(const Config& cfg,
 
             auto dist_packed = [&](__m256i p) __attribute__((always_inline)) {
                 __m256i inv = _mm256_cmpeq_epi32(p, neg1);
+                const __m256i pix_xy = _mm256_or_si256(_mm256_slli_epi32(yv, 16), _mm256_and_si256(xv, mask_lo));
+#if JFA_AVX2_USE_MADD
+                return dist_sq_vec_packed_xy(pix_xy, p, inv);
+#else
                 __m256i sx = _mm256_and_si256(p, mask_lo);
                 __m256i sy = _mm256_srli_epi32(p, 16);
                 __m256i dx32 = _mm256_sub_epi32(sx, xv);
                 __m256i dy32 = _mm256_sub_epi32(sy, yv);
-#if JFA_AVX2_USE_MADD
-                __m256i v16 = pack_dxdy_i16_pairs(dx32, dy32);
-                __m256i d = _mm256_madd_epi16(v16, v16);
-#else
                 __m256i dx2 = _mm256_mullo_epi32(dx32, dx32);
                 __m256i dy2 = _mm256_mullo_epi32(dy32, dy32);
                 __m256i d = _mm256_add_epi32(dx2, dy2);
-#endif
                 return _mm256_blendv_epi8(d, inf, inv);
+#endif
             };
 
             auto check_row = [&](int base_offset, __m256i& row_d, __m256i& row_packed) __attribute__((always_inline)) {
@@ -1837,14 +1853,8 @@ void jfa_cpu_omp_simd(const Config& cfg,
 
     if (!cfg.use_coord_prop) {
         // Index-based JFA (default): store per-pixel seed index, gather seed coordinates via AVX2.
-        SeedIndexBuffer bufA(N, -1);
-        SeedIndexBuffer bufB(N, -1);
-
-        for (int i = 0; i < static_cast<int>(seeds.size()); ++i) {
-            const auto& s = seeds[i];
-            if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
-            bufA[s.y * W + s.x] = i;
-        }
+        SeedIndexBuffer bufA(N);
+        SeedIndexBuffer bufB(N);
 
         std::vector<int> steps;
         {
@@ -1884,6 +1894,24 @@ void jfa_cpu_omp_simd(const Config& cfg,
 
         #pragma omp parallel
         {
+            // NUMA-aware first-touch init: distribute pages across threads.
+            #pragma omp for schedule(static)
+            for (int i = 0; i < N; ++i) {
+                bufA[i] = -1;
+                bufB[i] = -1;
+            }
+
+            // Deterministic seed init (later seeds overwrite earlier ones).
+            #pragma omp single
+            {
+                for (int i = 0; i < static_cast<int>(seeds.size()); ++i) {
+                    const auto& s = seeds[i];
+                    if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
+                    bufA[s.y * W + s.x] = i;
+                }
+            }
+            #pragma omp barrier
+
             for (int pass_idx = 0; pass_idx < static_cast<int>(steps.size()); ++pass_idx) {
                 const int step = steps[pass_idx];
                 const bool fromA = (pass_idx % 2 == 0);
@@ -1909,6 +1937,8 @@ void jfa_cpu_omp_simd(const Config& cfg,
     }
 
     std::vector<int> id_map(N, -1);
+    // id_map is only used for final coordinate->seed-index conversion and callback materialization.
+    // Keep deterministic overwrite order (later seeds win).
     for (int i = 0; i < static_cast<int>(seeds.size()); ++i) {
         const auto& s = seeds[i];
         if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
@@ -1928,20 +1958,34 @@ void jfa_cpu_omp_simd(const Config& cfg,
     }
 
     if (cfg.cpu_coordbuf_layout == CpuCoordBufLayout::SoA) {
-        std::vector<int> sxA(N, INVALID_COORD), syA(N, INVALID_COORD);
-        std::vector<int> sxB(N, INVALID_COORD), syB(N, INVALID_COORD);
-
-        for (const auto& s : seeds) {
-            if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
-            const int idx = s.y * W + s.x;
-            sxA[idx] = s.x;
-            syA[idx] = s.y;
-        }
+        std::vector<int> sxA(N), syA(N);
+        std::vector<int> sxB(N), syB(N);
 
         SeedIndexBuffer tmp_indices;
 
         #pragma omp parallel
         {
+            // NUMA-aware first-touch init
+            #pragma omp for schedule(static)
+            for (int i = 0; i < N; ++i) {
+                sxA[i] = INVALID_COORD;
+                syA[i] = INVALID_COORD;
+                sxB[i] = INVALID_COORD;
+                syB[i] = INVALID_COORD;
+            }
+
+            // Deterministic seed init (later seeds overwrite earlier ones)
+            #pragma omp single
+            {
+                for (const auto& s : seeds) {
+                    if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
+                    const int idx = s.y * W + s.x;
+                    sxA[idx] = s.x;
+                    syA[idx] = s.y;
+                }
+            }
+            #pragma omp barrier
+
             for (int pass_idx = 0; pass_idx < static_cast<int>(steps.size()); ++pass_idx) {
                 const int step = steps[pass_idx];
                 const bool fromA = (pass_idx % 2 == 0);
@@ -1974,19 +2018,31 @@ void jfa_cpu_omp_simd(const Config& cfg,
     }
 
     if (cfg.cpu_coordbuf_layout == CpuCoordBufLayout::Packed) {
-        std::vector<int> pA(N, -1);
-        std::vector<int> pB(N, -1);
-
-        for (const auto& s : seeds) {
-            if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
-            const int idx = s.y * W + s.x;
-            pA[idx] = (s.y << 16) | (s.x & 0xFFFF);
-        }
+        std::vector<int> pA(N);
+        std::vector<int> pB(N);
 
         SeedIndexBuffer tmp_indices;
 
         #pragma omp parallel
         {
+            // NUMA-aware first-touch init
+            #pragma omp for schedule(static)
+            for (int i = 0; i < N; ++i) {
+                pA[i] = -1;
+                pB[i] = -1;
+            }
+
+            // Deterministic seed init
+            #pragma omp single
+            {
+                for (const auto& s : seeds) {
+                    if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
+                    const int idx = s.y * W + s.x;
+                    pA[idx] = (s.y << 16) | (s.x & 0xFFFF);
+                }
+            }
+            #pragma omp barrier
+
             for (int pass_idx = 0; pass_idx < static_cast<int>(steps.size()); ++pass_idx) {
                 const int step = steps[pass_idx];
                 const bool fromA = (pass_idx % 2 == 0);
@@ -2014,20 +2070,32 @@ void jfa_cpu_omp_simd(const Config& cfg,
         return;
     }
 
-    std::vector<int> xyA(2 * N, INVALID_COORD);
-    std::vector<int> xyB(2 * N, INVALID_COORD);
-
-    for (const auto& s : seeds) {
-        if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
-        const int idx = s.y * W + s.x;
-        xyA[2 * idx + 0] = s.x;
-        xyA[2 * idx + 1] = s.y;
-    }
+    std::vector<int> xyA(2 * N);
+    std::vector<int> xyB(2 * N);
 
     SeedIndexBuffer tmp_indices;
 
     #pragma omp parallel
     {
+        // NUMA-aware first-touch init (xy arrays are length 2*N)
+        #pragma omp for schedule(static)
+        for (int i = 0; i < 2 * N; ++i) {
+            xyA[i] = INVALID_COORD;
+            xyB[i] = INVALID_COORD;
+        }
+
+        // Deterministic seed init
+        #pragma omp single
+        {
+            for (const auto& s : seeds) {
+                if (s.x < 0 || s.x >= W || s.y < 0 || s.y >= H) continue;
+                const int idx = s.y * W + s.x;
+                xyA[2 * idx + 0] = s.x;
+                xyA[2 * idx + 1] = s.y;
+            }
+        }
+        #pragma omp barrier
+
         for (int pass_idx = 0; pass_idx < static_cast<int>(steps.size()); ++pass_idx) {
             const int step = steps[pass_idx];
             const bool fromA = (pass_idx % 2 == 0);
