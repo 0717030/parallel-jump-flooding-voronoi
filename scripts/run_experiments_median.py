@@ -135,6 +135,41 @@ def print_progress(done: int, total: int, desc: str, start_t: float) -> None:
     sys.stderr.write("\r" + line[:200] + " " * 10)  # trim + clear tail
     sys.stderr.flush()
 
+def _split_csv_tokens(xs: List[str]) -> List[str]:
+    out: List[str] = []
+    for x in xs:
+        for part in x.split(","):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
+def filter_methods(methods: List["Method"], only: Optional[List[str]]) -> List["Method"]:
+    """
+    Filter methods by names/prefix patterns.
+
+    - If only is None/empty: return methods as-is.
+    - Tokens are matched as:
+      - "name"  => exact match on Method.name
+      - "pref*" => prefix match on Method.name
+    - serial_baseline is always kept if present (needed for speedup computation).
+    """
+    if not only:
+        return methods
+
+    tokens = _split_csv_tokens(only)
+    exact = {t for t in tokens if not t.endswith("*")}
+    prefixes = [t[:-1] for t in tokens if t.endswith("*")]
+
+    def keep(m: "Method") -> bool:
+        if m.name == "serial_baseline":
+            return True
+        if m.name in exact:
+            return True
+        return any(m.name.startswith(p) for p in prefixes)
+
+    return [m for m in methods if keep(m)]
+
 
 @dataclass(frozen=True)
 class Method:
@@ -221,6 +256,7 @@ def default_methods(threads_list: List[int], include_simd_layouts: bool) -> List
 
         # Coord-buffer-layout sweep (coord-prop mode)
         methods.append(Method("simd_coordprop_coordbuf_aos", "simd", 1, ("--use-coord-prop", "--cpu-coordbuf-layout", "aos")))
+        methods.append(Method("simd_coordprop_coordbuf_packed", "simd", 1, ("--use-coord-prop", "--cpu-coordbuf-layout", "packed")))
 
     # OpenMP-only and OpenMP+SIMD
     for t in threads_list:
@@ -252,6 +288,15 @@ def main() -> int:
         action="store_true",
         help="Include CPU SIMD SoA/AoS layout comparison methods (more runs).",
     )
+    ap.add_argument(
+        "--only-methods",
+        nargs="+",
+        default=None,
+        help=(
+            "Run only selected method names (supports prefix* matching, comma-separated ok). "
+            "Example: --only-methods simd_index_seeds_soa omp_t* omp_simd_t*"
+        ),
+    )
     ap.add_argument("--dry-run", action="store_true", help="Print planned experiments and exit")
     args = ap.parse_args()
 
@@ -279,6 +324,13 @@ def main() -> int:
     base_env["OMP_DYNAMIC"] = "false"
 
     methods = default_methods(args.threads, include_simd_layouts=args.include_simd_layouts)
+    methods = filter_methods(methods, args.only_methods)
+    # Always keep serial baseline for speedup computation.
+    if not any(m.name == "serial_baseline" for m in methods):
+        methods = [Method("serial_baseline", "serial", 1, ())] + methods
+    if len(methods) <= 1:
+        print("ERROR: --only-methods filtered out all non-serial methods.", file=sys.stderr)
+        return 2
 
     plan = [(w, h, seeds, m) for (w, h) in args.sizes for seeds in args.seeds for m in methods]
 
