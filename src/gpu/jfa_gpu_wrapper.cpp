@@ -22,6 +22,10 @@ void free_pinned_memory(int* ptr) {
     }
 }
 
+void cuda_warmup() {
+    cudaFree(0);
+}
+
 // Define GPUSeed here to match .cu (layout compatible with Seed)
 struct GPUSeed {
     int x, y;

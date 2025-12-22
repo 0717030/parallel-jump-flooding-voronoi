@@ -45,6 +45,12 @@ struct Config {
     CpuSeedsLayout cpu_seeds_layout = CpuSeedsLayout::Packed; // CPU SIMD only (index-based mode)
     CpuCoordBufLayout cpu_coordbuf_layout = CpuCoordBufLayout::SoA; // CPU SIMD only (coord-prop mode)
     int benchmark_frames = 1; // Number of frames to simulate (reuse allocation)
+    bool use_ldg = false; // Use __ldg() intrinsic
+    bool use_restrict = false; // Use __restrict__ keyword
+    bool use_fma = false; // Use fmaf() intrinsic
+    bool use_ultimate = false; // Use combined intrinsics (__restrict__, __ldg, fmaf)
+    bool use_int_math = false; // Use integer math instead of float
+    bool use_manhattan = false; // Use Manhattan distance (__sad)
 };
 
 } // namespace jfa
