@@ -57,7 +57,5 @@ target_link_libraries(jfa_demo
     PRIVATE jfa_cpu jfa_exact jfa_visualize jfa_gpu
 )
 
-find_package(OpenMP)
-if (OpenMP_CXX_FOUND)
-    target_link_libraries(jfa_cpu PUBLIC OpenMP::OpenMP_CXX)
-endif()
+find_package(OpenMP REQUIRED)
+target_link_libraries(jfa_cpu PUBLIC OpenMP::OpenMP_CXX)

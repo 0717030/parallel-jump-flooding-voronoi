@@ -9,7 +9,7 @@ CSV_PATH = ROOT / "results" / "results_jfa.csv"
 def main():
     df = pd.read_csv(CSV_PATH)
 
-    # 只看 CPU OMP strong scaling
+    # CPU strong scaling, with serial baseline
     sizes = df[["width", "height"]].drop_duplicates().sort_values(["width", "height"])
 
     # 做一張「每個 size 一條線」的 speedup vs threads 圖
@@ -29,23 +29,24 @@ def main():
 
         serial_ms = df_serial["serial_ms"].iloc[0]
 
-        # OMP rows
-        df_omp = df_size[df_size["backend_str"] == "omp"].copy()
-        if df_omp.empty:
-            print(f"[WARN] No OMP rows for size {W}x{H}, skip")
-            continue
-
-        df_omp.sort_values("threads", inplace=True)
-        df_omp["speedup"] = serial_ms / df_omp["parallel_ms"]
-        df_omp["efficiency"] = df_omp["speedup"] / df_omp["threads"]
-
-        # 畫 speedup 線
         label = f"{W}x{H}"
-        plt.plot(df_omp["threads"], df_omp["speedup"], marker="o", label=label)
+
+        # Plot by backend_name to avoid mixing multiple variants (AoS/SoA, coord/index).
+        for backend_name, marker in [
+            ("cpu-omp", "o"),
+            ("cpu-omp-simd-index-soa", "s"),
+            ("cpu-omp-simd-coord-soa", "^"),
+        ]:
+            df_b = df_size[df_size["backend_name"] == backend_name].copy()
+            if df_b.empty:
+                continue
+            df_b.sort_values("threads", inplace=True)
+            df_b["speedup"] = serial_ms / df_b["parallel_ms"]
+            plt.plot(df_b["threads"], df_b["speedup"], marker=marker, label=f"{label} ({backend_name})")
 
     plt.xlabel("Threads")
     plt.ylabel("Speedup vs serial JFA")
-    plt.title("OpenMP JFA strong scaling")
+    plt.title("CPU JFA strong scaling (selected variants)")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -59,17 +60,26 @@ def main():
 
     df_serial = df_max[df_max["backend_str"] == "serial"]
     serial_ms = df_serial["serial_ms"].iloc[0]
-    df_omp = df_max[df_max["backend_str"] == "omp"].copy()
-    df_omp.sort_values("threads", inplace=True)
-    df_omp["speedup"] = serial_ms / df_omp["parallel_ms"]
-    df_omp["efficiency"] = df_omp["speedup"] / df_omp["threads"]
-
     plt.figure()
-    plt.plot(df_omp["threads"], df_omp["efficiency"], marker="o")
+
+    for backend_name, marker in [
+        ("cpu-omp", "o"),
+        ("cpu-omp-simd-index-soa", "s"),
+        ("cpu-omp-simd-coord-soa", "^"),
+    ]:
+        df_b = df_max[df_max["backend_name"] == backend_name].copy()
+        if df_b.empty:
+            continue
+        df_b.sort_values("threads", inplace=True)
+        df_b["speedup"] = serial_ms / df_b["parallel_ms"]
+        df_b["efficiency"] = df_b["speedup"] / df_b["threads"]
+        plt.plot(df_b["threads"], df_b["efficiency"], marker=marker, label=backend_name)
+
     plt.xlabel("Threads")
     plt.ylabel("Parallel efficiency")
-    plt.title(f"OpenMP JFA efficiency ({Wm}x{Hm})")
+    plt.title(f"CPU JFA efficiency ({Wm}x{Hm})")
     plt.grid(True)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(ROOT / "results" / "efficiency_omp_maxsize.png", dpi=200)
 
