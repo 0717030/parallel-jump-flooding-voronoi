@@ -50,6 +50,49 @@ inline void set_pcore_affinity()
     // On non-Linux systems, this is a no-op
 }
 
+// Set CPU affinity depending on requested thread count.
+// - If num_threads > 0 and <= number of P-cores, pin to P-cores only (same behavior as set_pcore_affinity()).
+// - If num_threads is larger, allow all available cores so extra threads can also use E-cores.
+inline void set_affinity_for_threads(int num_threads)
+{
+#ifdef __linux__
+    // For i7-12700: Use 8 different physical P-cores
+    const int pcore_cpus[] = {0, 2, 4, 6, 8, 10, 12, 14};
+    const int num_pcores = sizeof(pcore_cpus) / sizeof(pcore_cpus[0]);
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+
+    if (num_threads > 0 && num_threads <= num_pcores) {
+        // Same as set_pcore_affinity(): use only the 8 P-cores
+        for (int i = 0; i < num_pcores; ++i) {
+            CPU_SET(pcore_cpus[i], &cpuset);
+        }
+    } else {
+        // Allow all online CPUs so that additional threads can run on other cores too.
+        long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+        if (nproc <= 0) {
+            return;
+        }
+        for (long i = 0; i < nproc; ++i) {
+            CPU_SET(static_cast<int>(i), &cpuset);
+        }
+    }
+
+    // Set affinity for the current thread
+    pthread_t thread = pthread_self();
+    int ret = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+
+    // Also set process affinity (affects all threads in the process)
+    // This ensures OpenMP threads also respect the affinity
+    pid_t pid = getpid();
+    ret = sched_setaffinity(pid, sizeof(cpu_set_t), &cpuset);
+
+    (void)ret; // Suppress unused variable warning
+#endif
+    // On non-Linux systems, this is a no-op
+}
+
 } // namespace detail
 } // namespace jfa
 

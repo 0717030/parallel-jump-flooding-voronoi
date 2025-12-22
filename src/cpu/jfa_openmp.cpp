@@ -13,12 +13,15 @@ void jfa_cpu_omp(const Config& cfg,
                  int num_threads,
                  PassCallback pass_cb)
 {
-    // Set CPU affinity to P-cores only (avoid E-cores)
-    detail::set_pcore_affinity();
-    
     if (num_threads > 0) {
         omp_set_num_threads(num_threads);
     }
+    
+    // Set CPU affinity:
+    // - For small thread counts (<= P-core count), pin to P-cores only.
+    // - For larger thread counts, allow all cores so extra threads can use E-cores too.
+    detail::set_affinity_for_threads(num_threads);
+
     detail::jfa_cpu_common<true>(cfg, seeds, out_buffer, pass_cb);
 }
 
